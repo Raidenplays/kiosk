@@ -306,3 +306,14 @@ void KUI::Bag(float cx, float cy, float s, u32 body, u32 cutout, float squash) {
 	Circle(cx - hr + s * 0.045f, top + s * 0.16f, hole, cutout);
 	Circle(cx + hr - s * 0.045f, top + s * 0.16f, hole, cutout);
 }
+
+void KUI::Star(float cx, float cy, float r, u32 c) {
+	const float inner = r * 0.45f;
+	for (int i = 0; i < 5; i++) {
+		const float a0 = -M_PI / 2 + i * 2 * M_PI / 5;
+		const float a1 = a0 + M_PI / 5, am = a0 - M_PI / 5;
+		const float px = cx + cosf(a0) * r, py = cy + sinf(a0) * r;
+		C2D_DrawTriangle(cx, cy, c, px, py, c, cx + cosf(a1) * inner, cy + sinf(a1) * inner, c, DEPTH);
+		C2D_DrawTriangle(cx, cy, c, cx + cosf(am) * inner, cy + sinf(am) * inner, c, px, py, c, DEPTH);
+	}
+}

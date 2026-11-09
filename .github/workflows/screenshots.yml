@@ -86,7 +86,8 @@ jobs:
           sleep 2
           ./squashfs-root/AppRun "$PWD/KioskDemo.3dsx" > emu.log 2>&1 &
           mkdir frames
-          ffmpeg -loglevel error -f x11grab -video_size 1024x768 -framerate 1 -i :99 -t 300 frames/%04d.png
+          xdotool mousemove 1020 760 || true
+          ffmpeg -loglevel error -f x11grab -draw_mouse 0 -video_size 1024x768 -framerate 1 -i :99 -t 300 frames/%04d.png
           tail -50 emu.log || true
           zip -qr frames.zip frames
       - name: Publish frames

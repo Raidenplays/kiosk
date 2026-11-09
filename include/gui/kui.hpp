@@ -55,6 +55,7 @@ namespace KUI {
 	void Check(float cx, float cy, float s, u32 c);
 	void Chevron(float cx, float cy, float s, bool left, u32 c);
 	void House(float cx, float cy, float s, u32 c);
+	void Star(float cx, float cy, float r, u32 c);
 	void Tile(float cx, float cy, float s, float t, u32 c); // Small rounded square (pattern/confetti).
 	void Pattern(float w, float h, float t, u32 c);      // Drifting rounded-square wallpaper.
 	void Ribbon(float x, float y, float w, const std::string &label, u32 fill);

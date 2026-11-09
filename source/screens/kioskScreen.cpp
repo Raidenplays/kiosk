@@ -108,6 +108,8 @@ static std::string PrettyCategory(const std::string &c) {
 	return out;
 }
 
+static const char *tabTitles[] = { "Home", "Search", "Updates", "Downloads", "Library" };
+
 static bool RequestPending() { return QueueSystem::RequestNeeded != NO_REQUEST && QueueSystem::Wait; }
 
 /*
@@ -808,7 +810,7 @@ void KioskScreen::Animate() {
 	/* Home scroll: keep the focused shelf near the top. */
 	if (!this->shelves.empty()) {
 		const float total = this->shelves.size() * SHELF_H + 6;
-		this->homeScrollTarget = std::clamp(this->shelfSel * SHELF_H - 20.0f, 0.0f, std::max(0.0f, total - TAB_Y));
+		this->homeScrollTarget = std::clamp(this->shelfSel * SHELF_H, 0.0f, std::max(0.0f, total - TAB_Y));
 		this->homeScroll = Approach(this->homeScroll, this->homeScrollTarget);
 
 		for (Shelf &s : this->shelves) {
@@ -1037,7 +1039,7 @@ void KioskScreen::DrawChrome(const std::string &title, const std::string &right)
 void KioskScreen::DrawHero(int idx, bool detailed) const {
 	const auto &e = E(idx);
 	const u32 bg = this->heroColor;
-	this->DrawChrome(detailed ? "Software details" : "Kiosk", e->GetConsoleString());
+	this->DrawChrome(detailed ? "Software details" : tabTitles[this->tab], e->GetConsoleString());
 
 	const float t = EaseOutCubic(this->heroFade);
 	const float off = (1.0f - t) * 8.0f;
@@ -1058,11 +1060,12 @@ void KioskScreen::DrawHero(int idx, bool detailed) const {
 	Text(96, 76 + off, 0.44f, Alpha(Lighten(bg, 0.78f), a), "by " + e->GetAuthor(), 284);
 
 	float cx = 96;
-	auto chip = [&](const std::string &label, u32 fill, u32 ink) {
-		const float w = TextWidth(0.38f, label) + 14;
+	auto chip = [&](const std::string &label, u32 fill, u32 ink, bool star = false) {
+		const float w = TextWidth(0.38f, label) + 14 + (star ? 12 : 0);
 		if (cx + w > 384) return;
 		Pill(cx, 99 + off, w, 18, fill);
-		Text(cx + 7, 101 + off, 0.38f, ink, label);
+		if (star) Star(cx + 12, 108 + off, 5.5f, RGBA(255, 214, 70));
+		Text(cx + 7 + (star ? 12 : 0), 101 + off, 0.38f, ink, label);
 		cx += w + 5;
 	};
 	const State s = this->StateOf(idx);
@@ -1070,7 +1073,7 @@ void KioskScreen::DrawHero(int idx, bool detailed) const {
 	else if (s == State::Installed) chip("Installed", WHITE, GOOD);
 	else if (s == State::Queued) chip("In downloads", WHITE, SKY);
 	if (this->IsNew(idx)) chip("New", SKY, WHITE);
-	if (e->GetStars() > 0) chip("★ " + std::to_string(e->GetStars()), Darken(bg, 0.22f), WHITE);
+	if (e->GetStars() > 0) chip(std::to_string(e->GetStars()), Darken(bg, 0.22f), WHITE, true);
 	for (const std::string &cat : e->GetCategories()) chip(PrettyCategory(cat), Darken(bg, 0.22f), WHITE);
 
 	/* Description card. */
@@ -1090,7 +1093,7 @@ void KioskScreen::DrawHero(int idx, bool detailed) const {
 }
 
 void KioskScreen::DrawEmptyTop(const std::string &title, const std::string &subtitle, int glyph) const {
-	this->DrawChrome("Kiosk");
+	this->DrawChrome(tabTitles[this->tab]);
 
 	const float phase = fmodf(this->frame / 45.0f, 1.0f);
 	const float hop = sinf(phase * M_PI);
@@ -1287,7 +1290,7 @@ void KioskScreen::DrawCelebration() const {
 	if (t < 38) {
 		const float scale = t < 30 ? 1.0f + 0.05f * sinf(t * 0.7f) : 1.0f - (t - 30) / 8.0f;
 		if (scale > 0.02f) this->DrawJar(200, JAR_TOP, JAR_SIZE, 1.0f, e->GetIcon(), this->heroColor, scale, 1.0f);
-		if (t < 30) Circle(200, JAR_TOP + JAR_SIZE / 2, 50 + t, Alpha(WHITE, (u8)(t * 3)));
+		if (t < 30) Circle(200, JAR_TOP + JAR_SIZE / 2, 48 + t * 0.4f, Alpha(WHITE, (u8)(t * 2)));
 	}
 	if (t >= 30 && t < 44) Circle(200, JAR_TOP + JAR_SIZE / 2, (t - 30) * 12.0f, Alpha(WHITE, (u8)(220 * (1.0f - (t - 30) / 14.0f))));
 

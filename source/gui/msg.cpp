@@ -40,7 +40,8 @@ static void Mascot(float cx, float groundY, float size) {
 	const float phase = fmodf(msgFrame / 40.0f, 1.0f);
 	const float hop = sinf(phase * M_PI);
 	const float squash = phase < 0.12f ? (0.12f - phase) * 1.4f : 0.0f;
-	Circle(cx, groundY + 2, size * 0.4f * (1.0f - hop * 0.3f), BG_DOT); // Shadow.
+	const float sw = size * 0.8f * (1.0f - hop * 0.3f);
+	C2D_DrawEllipseSolid(cx - sw / 2, groundY - 3, 0.5f, sw, 7, CARD_SHADOW); // Shadow.
 	Bag(cx, groundY - size * 0.5f - hop * size * 0.35f, size, ACCENT, BG, squash);
 }
 
