@@ -1361,7 +1361,9 @@ void KioskScreen::DrawTabBar() const {
 			case TAB_SEARCH: Sprite(sprites_search_idx, cx, iy, c, 0.75f); break;
 			case TAB_UPDATES: Sprite(sprites_update_idx, cx, iy, c, 0.75f); break;
 			case TAB_DOWNLOADS: Bag(cx, iy, 14 * (1.0f + bounce * 0.5f), c, i == this->tab ? ACCENT_SOFT : WHITE); break;
-			case TAB_LIBRARY: Sprite(sprites_installed_app_idx, cx, iy, c, 0.75f); break;
+			case TAB_LIBRARY:
+				for (int k = 0; k < 4; k++) RoundRect(cx - 7 + (k % 2) * 8, iy - 7 + (k / 2) * 8, 6, 6, 1.5f, c);
+				break;
 		}
 		TextCentered(cx, TAB_Y + 22, 0.34f, c, labels[i]);
 	}
