@@ -1,0 +1,283 @@
+/*
+*   This file is part of Universal-Updater
+*   Copyright (C) 2019-2021 Universal-Team
+*
+*   This program is free software: you can redistribute it and/or modify
+*   it under the terms of the GNU General Public License as published by
+*   the Free Software Foundation, either version 3 of the License, or
+*   (at your option) any later version.
+*
+*   This program is distributed in the hope that it will be useful,
+*   but WITHOUT ANY WARRANTY; without even the implied warranty of
+*   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+*   GNU General Public License for more details.
+*
+*   You should have received a copy of the GNU General Public License
+*   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*   Additional Terms 7.b and 7.c of GPLv3 apply to this file:
+*       * Requiring preservation of specified reasonable legal notices or
+*         author attributions in that material or in the Appropriate Legal
+*         Notices displayed by works containing it.
+*       * Prohibiting misrepresentation of the origin of that material,
+*         or requiring that modified versions of such material be marked in
+*         reasonable ways as different from the original version.
+*/
+
+#include "animation.hpp"
+#include "common.hpp"
+#include "download.hpp"
+#include "fileBrowse.hpp"
+#include "files.hpp"
+#include "keyboard.hpp"
+#include "overlay.hpp"
+#include "qrcode.hpp"
+#include "scriptUtils.hpp"
+#include "storeUtils.hpp"
+#include <unistd.h>
+
+extern bool checkWifiStatus();
+extern void notConnectedMsg();
+extern bool touching(touchPosition touch, Structs::ButtonPos button);
+static const std::vector<Structs::ButtonPos> mainButtons = {
+	{ 10, 34, 300, 22 },
+	{ 10, 64, 300, 22 },
+	{ 10, 94, 300, 22 },
+	{ 10, 124, 300, 22 },
+	{ 10, 154, 300, 22 },
+	{ 10, 184, 300, 22 },
+
+	{ 112, 215, 16, 16 }, // Delete.
+	{ 154, 215, 16, 16 }, // Update.
+	{ 200, 215, 16, 16 }, // Add.
+	{ 4, 0, 24, 24 } // Back.
+};
+
+/*
+	Delete a store.. including the Spritesheets, if found.
+
+	const std::string &file: The file of the UniStore.
+*/
+static void DeleteStore(const std::string &file) {
+	Store store(std::string(_STORE_PATH) + file, file, Store::UpdateMode::skip, false);
+
+	/* Cause it's an array, delete all Spritesheets which exist. */
+	for (const std::string &sheet : store.GetInfo().sheets) {
+		if (!sheet.empty() && sheet.find('/') == std::string::npos) {
+			if (access((std::string(_STORE_PATH) + sheet).c_str(), F_OK) == 0) {
+				deleteFile((std::string(_STORE_PATH) + sheet).c_str());
+			}
+		}
+	}
+
+	deleteFile((std::string(_STORE_PATH) + file).c_str()); // Now delete UniStore.
+}
+
+/*
+	Download a store.. including the SpriteSheets, if found.
+*/
+static bool DownloadStore() {
+	const std::string URL = QR_Scanner::StoreHandle();
+	if (URL == "") return false;
+
+	std::string file;
+	DownloadUniStore(URL, -1, Lang::get("DOWNLOADING_UNISTORE"), &file);
+	Store(_STORE_PATH + file, file, Store::UpdateMode::spritesheet, false);
+
+	hidScanInput(); // Re-Scan.
+	return true;
+}
+
+static bool UpdateStore(const std::string &file) {
+	if (file == "") return false;
+	Store(_STORE_PATH + file, file, Store::UpdateMode::forced, false);
+	return true;
+}
+
+/*
+	This is the UniStore Manage Handle.
+	Here you can..
+
+	- Delete a UniStore.
+	- Download / Add a UniStore.
+	- Check for Updates for a UniStore.
+	- Switch the UniStore.
+*/
+void Overlays::SelectStore() {
+	bool doOut = false, skipUpdate = false;
+	int selection = 0, sPos = 0;
+
+	static std::vector<Store::Info> info;
+	ThreadFunc helper = [] (void *) {
+		info.clear();
+		info = GetUniStoreInfo(_STORE_PATH);
+		helperThread = nullptr;
+	};
+
+	// Ensure no old thread is running
+	if (helperThread) {
+		Msg::DisplayMsg(Lang::get("LOADING_UNISTORE_LIST"));
+		threadJoin(helperThread, U64_MAX);
+	}
+
+	bool updateList = true;
+	int rotation = 0.0f;
+	while(!doOut) {
+		if (updateList) {
+			updateList = false;
+
+			s32 prio = 0;
+			svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+			helperThread = threadCreate(helper, NULL, 64 * 1024, prio - 1, -2, true);
+		}
+
+		Gui::clearTextBufs();
+		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+		C2D_TargetClear(Top, TRANSPARENT);
+		C2D_TargetClear(Bottom, TRANSPARENT);
+
+		GFX::DrawTop();
+
+		if (info.size() > 0) {
+			if (info[selection].valid) {
+				Gui::DrawStringCentered(0, 1, 0.7f, UITheme.TextColor(), info[selection].title, 390, 0, font);
+				Gui::DrawStringCentered(0, 30, 0.6f, UITheme.TextColor(), info[selection].author, 380, 0, font);
+				Gui::DrawStringCentered(0, 70, 0.5f, UITheme.TextColor(), info[selection].description, 380, 130, font, C2D_WordWrap);
+
+			} else {
+				Gui::DrawStringCentered(0, 1, 0.7f, UITheme.TextColor(), Lang::get("INVALID_UNISTORE"), 390, 0, font);
+				Gui::DrawStringCentered(0, 70, 0.6f, UITheme.TextColor(), info[selection].error, 390, 0, font);
+			}
+
+			Gui::DrawString(10, 200, 0.4, UITheme.TextColor(), "- " + Lang::get("ENTRIES") + ": " + std::to_string(info[selection].entryCount), 150, 0, font);
+			Gui::DrawString(10, 210, 0.4, UITheme.TextColor(), "- " + Lang::get("REVISION") + ": " + std::to_string(info[selection].revision), 150, 0, font);
+			Gui::DrawString(10, 220, 0.4, UITheme.TextColor(), "- " + Lang::get("FILE_NAME") + ": " + info[selection].file, 380, 0, font);
+		}
+
+		Animation::QueueEntryDone();
+		GFX::DrawBottom();
+
+		Gui::Draw_Rect(0, 0, 320, 25, UITheme.BarColor());
+		Gui::Draw_Rect(0, 25, 320, 1, UITheme.BarOutline());
+		GFX::DrawIcon(sprites_arrow_idx, mainButtons[9].x, mainButtons[9].y, UITheme.TextColor());
+		Gui::DrawStringCentered(0, 2, 0.6, UITheme.TextColor(), Lang::get("SELECT_UNISTORE_2"), 272, 0, font);
+
+		if (info.size() > 0) {
+			for(int i = 0; i < 6 && i < (int)info.size(); i++) {
+				if (sPos + i == selection) Gui::Draw_Rect(mainButtons[i].x, mainButtons[i].y, mainButtons[i].w, mainButtons[i].h, UITheme.MarkSelected());
+				Gui::DrawStringCentered(10 - 160 + (300 / 2), mainButtons[i].y + 4, 0.45f, UITheme.TextColor(), info[sPos + i].title, 295, 0, font);
+			}
+		} else if (helperThread) {
+			Gui::DrawStringCentered(0, (240 - Gui::GetStringHeight(0.6f, Lang::get("LOADING_UNISTORE_LIST"))) / 2, 0.6f, UITheme.TextColor(), Lang::get("LOADING_UNISTORE_LIST"), 315, 0, font);
+
+			GFX::DrawIconRotated(sprites_queue_idx, 304, 12, rotation, UITheme.TextColor(), 1.0f, 0.5f, 0.5f);
+			rotation = (rotation + 3) % 90;
+		}
+
+		GFX::DrawIcon(sprites_delete_idx, mainButtons[6].x, mainButtons[6].y, UITheme.TextColor());
+		GFX::DrawIcon(sprites_update_idx, mainButtons[7].x, mainButtons[7].y, UITheme.TextColor());
+		GFX::DrawIcon(sprites_add_idx, mainButtons[8].x, mainButtons[8].y, UITheme.TextColor());
+		C3D_FrameEnd(0);
+
+		hidScanInput();
+		touchPosition touch;
+		hidTouchRead(&touch);
+		u32 hRepeat = hidKeysDownRepeat();
+		Animation::HandleQueueEntryDone();
+
+		if (info.size() > 0) {
+			if (hRepeat & KEY_DOWN) {
+				if (selection < (int)info.size() - 1) selection++;
+				else selection = 0;
+				skipUpdate = false;
+			}
+
+			if (hRepeat & KEY_UP) {
+				if (selection > 0) selection--;
+				else selection = info.size() - 1;
+				skipUpdate = false;
+			}
+
+			if (hRepeat & KEY_RIGHT) {
+				if (selection + 6 < (int)info.size() - 1) selection += 6;
+				else selection = info.size() - 1;
+				skipUpdate = false;
+			}
+
+			if (hRepeat & KEY_LEFT) {
+				if (selection - 6 > 0) selection -= 6;
+				else selection = 0;
+				skipUpdate = false;
+			}
+
+			if (hidKeysDown() & (KEY_A | KEY_TOUCH)) {
+				bool selected = hidKeysDown() & KEY_A;
+				for (int i = 0; i < 6; i++) {
+					if (touching(touch, mainButtons[i])) {
+						if (selection == i + sPos) {
+							selected = true;
+						} else {
+							selection = i + sPos;
+
+							if (i == 0 && sPos > 0)
+								sPos--;
+							else if (i == 5 && sPos + 6 < (int)info.size())
+								sPos++;
+						}
+					}
+				}
+
+				if (selected && info[selection].valid) {
+					/* Load selected one. */
+					config->lastStore(info[selection].file);
+					StoreUtils::store = std::make_unique<Store>(_STORE_PATH + info[selection].file, info[selection].file, skipUpdate ? Store::UpdateMode::skip : Store::UpdateMode::automatic, true);
+					StoreUtils::ResetSearch();
+					doOut = true;
+				}
+			}
+
+			/* Delete UniStore. */
+			if ((hidKeysDown() & KEY_X) || (hidKeysDown() & KEY_TOUCH && touching(touch, mainButtons[6]))) {
+				if (info[selection].file != "") {
+					DeleteStore(info[selection].file);
+					selection = 0;
+					updateList = true;
+				}
+			}
+
+			/* Download latest UniStore. */
+			if ((hidKeysDown() & KEY_START) || (hidKeysDown() & KEY_TOUCH && touching(touch, mainButtons[7]))) {
+				if (checkWifiStatus()) {
+					if (info[selection].url != "") {
+						if (UpdateStore(info[selection].file)) {
+							updateList = true;
+							skipUpdate = true;
+						}
+					}
+
+				} else {
+					notConnectedMsg();
+				}
+			}
+
+			if (selection < sPos) sPos = selection;
+			else if (selection > sPos + 6 - 1) sPos = selection - 6 + 1;
+		}
+
+		/* UniStore QR Code / URL Download. */
+		if ((hidKeysDown() & KEY_Y) || (hidKeysDown() & KEY_TOUCH && touching(touch, mainButtons[8]))) {
+			if (checkWifiStatus()) {
+				if (DownloadStore()) {
+					selection = 0;
+					updateList = true;
+				}
+
+			} else {
+				notConnectedMsg();
+			}
+		}
+
+		/* Go out of the menu. */
+		if ((hidKeysDown() & KEY_B) || (hidKeysDown() & KEY_TOUCH && touching(touch, mainButtons[9]))) doOut = true;
+	}
+}

@@ -1,0 +1,127 @@
+/*
+*   This file is part of Universal-Updater
+*   Copyright (C) 2019-2021 Universal-Team
+*
+*   This program is free software: you can redistribute it and/or modify
+*   it under the terms of the GNU General Public License as published by
+*   the Free Software Foundation, either version 3 of the License, or
+*   (at your option) any later version.
+*
+*   This program is distributed in the hope that it will be useful,
+*   but WITHOUT ANY WARRANTY; without even the implied warranty of
+*   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+*   GNU General Public License for more details.
+*
+*   You should have received a copy of the GNU General Public License
+*   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*   Additional Terms 7.b and 7.c of GPLv3 apply to this file:
+*       * Requiring preservation of specified reasonable legal notices or
+*         author attributions in that material or in the Appropriate Legal
+*         Notices displayed by works containing it.
+*       * Prohibiting misrepresentation of the origin of that material,
+*         or requiring that modified versions of such material be marked in
+*         reasonable ways as different from the original version.
+*/
+
+#ifndef _UNIVERSAL_UPDATER_STORE_UTILS_HPP
+#define _UNIVERSAL_UPDATER_STORE_UTILS_HPP
+
+#include "meta.hpp"
+#include "store.hpp"
+#include "storeEntry.hpp"
+#include <vector>
+
+enum class SortType : uint8_t {
+	TITLE,
+	AUTHOR,
+	LAST_UPDATED,
+	POPULARITY
+};
+
+namespace StoreUtils {
+	extern std::unique_ptr<Meta> meta;
+	extern std::unique_ptr<Store> store;
+	extern std::vector<std::shared_ptr<StoreEntry>> allEntries, entries;
+
+	/* Grid. */
+	void DrawGrid();
+	void GridLogic(int &currentMode, int &lastMode, int &smallDelay);
+
+	/* Top List. */
+	void DrawList();
+	void ListLogic(int &currentMode, int &lastMode, int &smallDelay);
+
+	/* Entry Info. */
+	void DrawEntryInfo(const std::shared_ptr<StoreEntry> &entry);
+	void EntryHandle(bool &showMark, bool &sFetch, int &mode, const std::shared_ptr<StoreEntry> &entry);
+
+	/* Side Menu. */
+	void DrawSideMenu(int currentMenu);
+	void SideMenuHandle(int &currentMenu, int &lastMenu);
+
+	/* Download entries. */
+	void DrawDownList(const std::shared_ptr<StoreEntry> &entry);
+	void DownloadHandle(const std::shared_ptr<StoreEntry> &entry, int &currentMenu, const int &lastMode, int &smallDelay);
+
+	/* Queue System. */
+	void DrawQueueMenu(const int queueIndex);
+	void QueueMenuHandle(int &queueIndex, int &storeMode);
+
+	/* Search + Favorite Menu. */
+	void ResetSearch();
+	void DoSearch();
+	void DrawSearchMenu();
+	void SearchHandle();
+
+	/* Mark Menu. */
+	void DisplayMarkBox(int marks);
+	void MarkHandle(std::shared_ptr<StoreEntry> &entry, bool &showMark);
+
+	/* Credits. */
+	void DrawCredits();
+
+	/* Screenshot menu. */
+	void DrawScreenshotMenu(const C2D_Image &img, const int sIndex, const bool sFetch, const int screenshotSize, const std::string &name, const int zoom, const bool canDisplay);
+	void ScreenshotMenu(C2D_Image &img, int &sIndex, bool &sFetch, int &storeMode, const int screenshotSize, int &zoom, bool &canDisplay);
+
+	/* Settings. */
+	void DrawSettings(int page, int selection, int sPos);
+	void SettingsHandle(int &page, bool &dspSettings, int &storeMode, int &selection, int &sPos);
+
+	/* Sorting. */
+	void DrawSorting(void);
+	void SortHandle(void);
+
+	/* Release Notes. */
+	size_t FindSplitPoint(const std::string &str, const std::vector<std::string> splitters);
+	const std::vector<std::string> &ProcessReleaseNotes(std::string ReleaseNotes, float wrapWidth, float fontSize);
+
+	void DrawReleaseNotes(const float &scrollOffset, const std::shared_ptr<StoreEntry> &entry);
+	void ReleaseNotesLogic(float &scrollOffset, float &scrollDelta, int &storeMode);
+
+	bool compareTitleDescending(const std::shared_ptr<StoreEntry> &a, const std::shared_ptr<StoreEntry> &b);
+	bool compareTitleAscending(const std::shared_ptr<StoreEntry> &a, const std::shared_ptr<StoreEntry> &b);
+
+	bool compareAuthorDescending(const std::shared_ptr<StoreEntry> &a, const std::shared_ptr<StoreEntry> &b);
+	bool compareAuthorAscending(const std::shared_ptr<StoreEntry> &a, const std::shared_ptr<StoreEntry> &b);
+
+	bool compareUpdateDescending(const std::shared_ptr<StoreEntry> &a, const std::shared_ptr<StoreEntry> &b);
+	bool compareUpdateAscending(const std::shared_ptr<StoreEntry> &a, const std::shared_ptr<StoreEntry> &b);
+
+	bool compareStarsDescending(const std::shared_ptr<StoreEntry> &a, const std::shared_ptr<StoreEntry> &b);
+	bool compareStarsAscending(const std::shared_ptr<StoreEntry> &a, const std::shared_ptr<StoreEntry> &b);
+
+	void SortEntries(void);
+
+	void search(std::string titleQuery, std::string descQuery, std::string authorQuery, std::string category, std::string console, int selectedMarks, bool updateAvl, bool installed, bool isAND, bool isNOT);
+
+	void ResetEntries();
+	void LoadEntries();
+
+	void RefreshInstalledApps(const std::string &nameFilter);
+
+	void AddAllToQueue();
+};
+
+#endif

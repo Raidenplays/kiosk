@@ -1,0 +1,1300 @@
+/*
+*   This file is part of Universal-Updater
+*   Copyright (C) 2019-2021 Universal-Team
+*
+*   This program is free software: you can redistribute it and/or modify
+*   it under the terms of the GNU General Public License as published by
+*   the Free Software Foundation, either version 3 of the License, or
+*   (at your option) any later version.
+*
+*   This program is distributed in the hope that it will be useful,
+*   but WITHOUT ANY WARRANTY; without even the implied warranty of
+*   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+*   GNU General Public License for more details.
+*
+*   You should have received a copy of the GNU General Public License
+*   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*   Additional Terms 7.b and 7.c of GPLv3 apply to this file:
+*       * Requiring preservation of specified reasonable legal notices or
+*         author attributions in that material or in the Appropriate Legal
+*         Notices displayed by works containing it.
+*       * Prohibiting misrepresentation of the origin of that material,
+*         or requiring that modified versions of such material be marked in
+*         reasonable ways as different from the original version.
+*/
+
+#include "animation.hpp"
+#include "download.hpp"
+#include "files.hpp"
+#include "lang.hpp"
+#include "queueSystem.hpp"
+#include "screenshot.hpp"
+#include "scriptUtils.hpp"
+#include "stringutils.hpp"
+#include "version.hpp"
+
+#include <3ds.h>
+#include <dirent.h>
+#include <malloc.h>
+#include <regex>
+#include <string>
+#include <time.h>
+#include <unistd.h>
+#include <vector>
+
+#define USER_AGENT APP_TITLE "-" VER_NUMBER
+
+static char *result_buf = nullptr;
+static size_t result_sz = 0;
+static size_t result_written = 0;
+
+#define TIME_IN_US 1
+#define TIMETYPE curl_off_t
+#define TIMEOPT CURLINFO_TOTAL_TIME_T
+#define MINIMAL_PROGRESS_FUNCTIONALITY_INTERVAL	3000000
+#define CACERT_PATH "sdmc:/config/ssl/cacert.pem"
+
+curl_off_t downloadTotal = 1; // Dont initialize with 0 to avoid division by zero later.
+curl_off_t downloadNow = 0;
+curl_off_t downloadSpeed = 0;
+
+static FILE *downfile = nullptr;
+static size_t file_buffer_pos = 0;
+static size_t file_toCommit_size = 0;
+static char *g_buffers[2] = { nullptr };
+static u8 g_index = 0;
+static Thread fsCommitThread;
+static LightEvent readyToCommit;
+static LightEvent waitCommit;
+static bool killThread = false;
+static bool writeError = false;
+#define FILE_ALLOC_SIZE 0x60000
+CURL *CurlHandle = nullptr;
+bool sslVerify = true;
+
+const std::vector<Structs::ButtonPos> promptButtons = {
+	{24, 94, 124, 48},
+	{172, 94, 124, 48}
+};
+const std::vector<std::string> promptLabels = {
+	"SKIP", "UPDATE"
+};
+extern bool touching(touchPosition touch, Structs::ButtonPos button);
+
+static int curlProgress(CURL *hnd,
+					curl_off_t dltotal, curl_off_t dlnow,
+					curl_off_t ultotal, curl_off_t ulnow)
+{
+	downloadTotal = dltotal;
+	downloadNow = dlnow;
+
+	if (writeError) return 1;
+	if (QueueSystem::CancelCallback) return 1;
+
+	return 0;
+}
+
+bool filecommit() {
+	if (!downfile) return false;
+	fseek(downfile, 0, SEEK_END);
+	u32 byteswritten = fwrite(g_buffers[!g_index], 1, file_toCommit_size, downfile);
+	if (byteswritten != file_toCommit_size) return false;
+	file_toCommit_size = 0;
+	return true;
+}
+
+static void commitToFileThreadFunc(void *args) {
+	LightEvent_Signal(&waitCommit);
+
+	while (true) {
+		LightEvent_Wait(&readyToCommit);
+		LightEvent_Clear(&readyToCommit);
+		if (killThread) threadExit(0);
+		writeError = !filecommit();
+		LightEvent_Signal(&waitCommit);
+	}
+}
+
+static size_t file_handle_data(char *ptr, size_t size, size_t nmemb, void *userdata) {
+	if (getAvailableSpace() < (u64)downloadTotal) return 0; // Out of space.
+	if (writeError) return 0;
+	if (QueueSystem::CancelCallback) return 0;
+
+	(void)userdata;
+	const size_t bsz = size * nmemb;
+	size_t tofill = 0;
+
+
+	if (!g_buffers[g_index]) {
+		LightEvent_Init(&waitCommit, RESET_STICKY);
+		LightEvent_Init(&readyToCommit, RESET_STICKY);
+
+		s32 prio = 0;
+		svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+		fsCommitThread = threadCreate(commitToFileThreadFunc, NULL, 0x1000, prio - 1, -2, true);
+
+		g_buffers[0] = (char*)memalign(0x1000, FILE_ALLOC_SIZE);
+		g_buffers[1] = (char*)memalign(0x1000, FILE_ALLOC_SIZE);
+
+		if (!fsCommitThread || !g_buffers[0] || !g_buffers[1]) return 0;
+	}
+
+	if (file_buffer_pos + bsz >= FILE_ALLOC_SIZE) {
+		tofill = FILE_ALLOC_SIZE - file_buffer_pos;
+		memcpy(g_buffers[g_index] + file_buffer_pos, ptr, tofill);
+
+		LightEvent_Wait(&waitCommit);
+		LightEvent_Clear(&waitCommit);
+		file_toCommit_size = file_buffer_pos + tofill;
+		file_buffer_pos = 0;
+		svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)g_buffers[g_index], file_toCommit_size);
+		g_index = !g_index;
+		LightEvent_Signal(&readyToCommit);
+	}
+
+	memcpy(g_buffers[g_index] + file_buffer_pos, ptr + tofill, bsz - tofill);
+	file_buffer_pos += bsz - tofill;
+	return bsz;
+}
+
+/*
+	Download a file.
+
+	const std::string &url: The download URL.
+	const std::string &path: Where to place the file.
+*/
+Result downloadToFile(const std::string &url, const std::string &path) {
+	if (!checkWifiStatus()) return -1; // NO WIFI.
+
+	bool needToDelete = false;
+	downloadTotal = 1;
+	downloadNow = 0;
+	downloadSpeed = 0;
+
+	CURLcode curlResult;
+	Result retcode = 0;
+	int res;
+
+	void *socubuf = memalign(0x1000, 0x100000);
+	if (!socubuf) {
+		retcode = -1;
+		goto exit;
+	}
+
+	res = socInit((u32 *)socubuf, 0x100000);
+	if (R_FAILED(res)) {
+		retcode = res;
+		goto exit;
+	}
+
+	/* make directories. */
+	for (char *slashpos = strchr(path.c_str() + 1, '/'); slashpos != NULL; slashpos = strchr(slashpos + 1, '/')) {
+		char bak = *(slashpos);
+		*(slashpos) = '\0';
+
+		mkdir(path.c_str(), 0777);
+
+		*(slashpos) = bak;
+	}
+
+	downfile = fopen(path.c_str(), "wb");
+	if (!downfile) {
+		retcode = -2;
+		goto exit;
+	}
+
+	CurlHandle = curl_easy_init();
+	curl_easy_setopt(CurlHandle, CURLOPT_BUFFERSIZE, FILE_ALLOC_SIZE);
+	curl_easy_setopt(CurlHandle, CURLOPT_URL, url.c_str());
+	curl_easy_setopt(CurlHandle, CURLOPT_NOPROGRESS, 0L);
+	curl_easy_setopt(CurlHandle, CURLOPT_USERAGENT, USER_AGENT);
+	curl_easy_setopt(CurlHandle, CURLOPT_FOLLOWLOCATION, 1L);
+	curl_easy_setopt(CurlHandle, CURLOPT_FAILONERROR, 1L);
+	curl_easy_setopt(CurlHandle, CURLOPT_ACCEPT_ENCODING, "gzip");
+	curl_easy_setopt(CurlHandle, CURLOPT_MAXREDIRS, 50L);
+	curl_easy_setopt(CurlHandle, CURLOPT_CONNECTTIMEOUT, 20L);
+	curl_easy_setopt(CurlHandle, CURLOPT_XFERINFOFUNCTION, curlProgress);
+	curl_easy_setopt(CurlHandle, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_2TLS);
+	curl_easy_setopt(CurlHandle, CURLOPT_WRITEFUNCTION, file_handle_data);
+	curl_easy_setopt(CurlHandle, CURLOPT_SSL_VERIFYPEER, sslVerify);
+	if (sslVerify) curl_easy_setopt(CurlHandle, CURLOPT_CAINFO, CACERT_PATH);
+	curl_easy_setopt(CurlHandle, CURLOPT_VERBOSE, 0L);
+	curl_easy_setopt(CurlHandle, CURLOPT_STDERR, stdout);
+	curl_easy_setopt(CurlHandle, CURLOPT_PROXY, config->proxyUrl().c_str());
+
+	curlResult = curl_easy_perform(CurlHandle);
+	curl_easy_cleanup(CurlHandle);
+	CurlHandle = nullptr;
+
+	if (curlResult != CURLE_OK) {
+		retcode = -curlResult;
+		needToDelete = true;
+		goto exit;
+	}
+
+	LightEvent_Wait(&waitCommit);
+	LightEvent_Clear(&waitCommit);
+
+	file_toCommit_size = file_buffer_pos;
+	svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)g_buffers[g_index], file_toCommit_size);
+	g_index = !g_index;
+
+	if (!filecommit()) {
+		retcode = -3;
+		needToDelete = true;
+		goto exit;
+	}
+
+	fflush(downfile);
+
+exit:
+	if (fsCommitThread) {
+		killThread = true;
+		LightEvent_Signal(&readyToCommit);
+		threadJoin(fsCommitThread, U64_MAX);
+		killThread = false;
+		fsCommitThread = nullptr;
+	}
+
+	socExit();
+
+	if (socubuf) free(socubuf);
+
+	if (downfile) {
+		fclose(downfile);
+		downfile = nullptr;
+	}
+
+	if (g_buffers[0]) {
+		free(g_buffers[0]);
+		g_buffers[0] = nullptr;
+	}
+
+	if (g_buffers[1]) {
+		free(g_buffers[1]);
+		g_buffers[1] = nullptr;
+	}
+
+	g_index = 0;
+	file_buffer_pos = 0;
+	file_toCommit_size = 0;
+	writeError = false;
+
+	if (needToDelete) {
+		if (access(path.c_str(), F_OK) == 0) deleteFile(path.c_str()); // Delete file, cause not fully downloaded.
+	}
+
+	if (QueueSystem::CancelCallback) return 0;
+	return retcode;
+}
+
+/*
+	following function is from
+	https://github.com/angelsl/libctrfgh/blob/master/curl_test/src/main.c
+*/
+static size_t handle_data(char *ptr, size_t size, size_t nmemb, void *userdata) {
+	(void)userdata;
+	const size_t bsz = size*nmemb;
+
+	if (result_sz == 0 || !result_buf) {
+		result_sz = 0x1000;
+		result_buf = (char *)malloc(result_sz);
+	}
+
+	bool need_realloc = false;
+	while (result_written + bsz > result_sz) {
+		result_sz <<= 1;
+		need_realloc = true;
+	}
+
+	if (need_realloc) {
+		char *new_buf = (char *)realloc(result_buf, result_sz);
+		if (!new_buf) return 0;
+
+		result_buf = new_buf;
+	}
+
+	if (!result_buf) return 0;
+
+	memcpy(result_buf + result_written, ptr, bsz);
+	result_written += bsz;
+	return bsz;
+}
+
+/*
+	This + Above is Used for No File Write and instead into RAM.
+*/
+static Result setupContext(CURL *hnd, const char *url) {
+	curl_easy_setopt(hnd, CURLOPT_BUFFERSIZE, 102400L);
+	curl_easy_setopt(hnd, CURLOPT_URL, url);
+	curl_easy_setopt(hnd, CURLOPT_NOPROGRESS, 0L);
+	curl_easy_setopt(hnd, CURLOPT_USERAGENT, USER_AGENT);
+	curl_easy_setopt(hnd, CURLOPT_FOLLOWLOCATION, 1L);
+	curl_easy_setopt(hnd, CURLOPT_MAXREDIRS, 50L);
+	curl_easy_setopt(hnd, CURLOPT_CONNECTTIMEOUT, 20L);
+	curl_easy_setopt(hnd, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_2TLS);
+	curl_easy_setopt(hnd, CURLOPT_WRITEFUNCTION, handle_data);
+	curl_easy_setopt(hnd, CURLOPT_SSL_VERIFYPEER, sslVerify);
+	if (sslVerify) curl_easy_setopt(hnd, CURLOPT_CAINFO, CACERT_PATH);
+	curl_easy_setopt(hnd, CURLOPT_VERBOSE, 0L);
+	curl_easy_setopt(hnd, CURLOPT_STDERR, stdout);
+	curl_easy_setopt(hnd, CURLOPT_PROXY, config->proxyUrl().c_str());
+
+	return 0;
+}
+
+/*
+	Download a file of a GitHub Release.
+
+	const std::string &url: Const Reference to the URL. (https://github.com/Owner/Repo)
+	const std::string &asset: Const Reference to the Asset. (File.filetype)
+	const std::string &path: Const Reference, where to store. (sdmc:/File.filetype)
+	bool includePrereleases: If including Pre-Releases.
+*/
+Result downloadFromRelease(const std::string &url, const std::string &asset, const std::string &path, bool includePrereleases) {
+	Result ret = 0;
+	CURL *hnd;
+
+	void *socubuf = memalign(0x1000, 0x100000);
+	if (!socubuf) {
+		return -1;
+	}
+
+	ret = socInit((u32*)socubuf, 0x100000);
+	if (R_FAILED(ret)) {
+		free(socubuf);
+		return ret;
+	}
+
+	std::regex parseUrl("github\\.com\\/(.+)\\/(.+)");
+	std::smatch result;
+	regex_search(url, result, parseUrl);
+
+	std::string repoOwner = result[1].str(), repoName = result[2].str();
+
+	std::string apiurl = "https://api.github.com/repos/" + repoOwner + "/" + repoName + (includePrereleases ? "/releases" : "/releases/latest");
+
+	hnd = curl_easy_init();
+
+	ret = setupContext(hnd, apiurl.c_str());
+	if (ret != 0) {
+		socExit();
+		free(result_buf);
+		free(socubuf);
+		result_buf = NULL;
+		result_sz = 0;
+		result_written = 0;
+		return ret;
+	}
+
+	CURLcode cres = curl_easy_perform(hnd);
+	curl_easy_cleanup(hnd);
+	char *newbuf = (char *)realloc(result_buf, result_written + 1);
+	result_buf = newbuf;
+	result_buf[result_written] = 0; // nullbyte to end it as a proper C style string.
+
+	if (cres != CURLE_OK) {
+		socExit();
+		free(result_buf);
+		free(socubuf);
+		result_buf = nullptr;
+		result_sz = 0;
+		result_written = 0;
+		return -1;
+	}
+
+	std::string assetUrl;
+
+	rapidjson::Document json;
+	json.Parse(result_buf);
+	if (includePrereleases ? json.IsArray() : json.IsObject()) {
+		if (includePrereleases && json.Size() == 0) {
+			ret = -2; // No releases.
+		} else {
+			const rapidjson::Value &parsedAPI = includePrereleases ? json[0] : json;
+
+			if (parsedAPI.HasMember("assets") && parsedAPI["assets"].IsArray()) {
+				for (const rapidjson::Value &jsonAsset : parsedAPI["assets"].GetArray()) {
+					if (jsonAsset.IsObject() && jsonAsset["name"].IsString() && jsonAsset["browser_download_url"].IsString()) {
+						std::string assetName = jsonAsset["name"].GetString();
+
+						if (ScriptUtils::matchPattern(asset, assetName)) {
+							assetUrl = jsonAsset["browser_download_url"].GetString();
+							break;
+						}
+					}
+				}
+			}
+		}
+
+	} else {
+		ret = -3;
+	}
+
+	socExit();
+	free(result_buf);
+	free(socubuf);
+	result_buf = nullptr;
+	result_sz = 0;
+	result_written = 0;
+
+	if (assetUrl.empty() || ret != 0) ret = DL_ERROR_GIT;
+	else ret = downloadToFile(assetUrl, path);
+
+	return ret;
+}
+
+/*
+	Check Wi-Fi status.
+	@return True if Wi-Fi is connected; false if not.
+*/
+bool checkWifiStatus(void) {
+	u32 wifiStatus;
+	bool res = false;
+
+	if (R_SUCCEEDED(ACU_GetWifiStatus(&wifiStatus)) && wifiStatus) res = true;
+
+	return res;
+}
+
+void downloadFailed(void) { Msg::waitMsg(Lang::get("DOWNLOAD_FAILED")); }
+
+void notImplemented(void) { Msg::waitMsg(Lang::get("NOT_IMPLEMENTED")); }
+
+void doneMsg(void) { Msg::waitMsg(Lang::get("DONE")); }
+
+void notConnectedMsg(void) { Msg::waitMsg(Lang::get("CONNECT_WIFI")); }
+
+/*
+	Return, if an update is available.
+
+	const std::string &URL: Const Reference to the URL of the UniStore.
+	int revCurrent: The current Revision. (-1 if unused)
+*/
+bool IsUpdateAvailable(const std::string &URL, int revCurrent) {
+	Msg::DisplayMsg(Lang::get("CHECK_UNISTORE_UPDATES"));
+	Result ret = 0;
+
+	void *socubuf = memalign(0x1000, 0x100000);
+	if (!socubuf) return false;
+
+	ret = socInit((u32 *)socubuf, 0x100000);
+
+	if (R_FAILED(ret)) {
+		free(socubuf);
+		return false;
+	}
+
+	CURL *hnd = curl_easy_init();
+
+	ret = setupContext(hnd, URL.c_str());
+	if (ret != 0) {
+		socExit();
+		free(result_buf);
+		free(socubuf);
+		result_buf = nullptr;
+		result_sz = 0;
+		result_written = 0;
+		return false;
+	}
+
+	CURLcode cres = curl_easy_perform(hnd);
+	curl_easy_cleanup(hnd);
+	char *newbuf = (char *)realloc(result_buf, result_written + 1);
+	result_buf = newbuf;
+	result_buf[result_written] = 0; // nullbyte to end it as a proper C style string.
+
+	if (cres != CURLE_OK) {
+		socExit();
+		free(result_buf);
+		free(socubuf);
+		result_buf = nullptr;
+		result_sz = 0;
+		result_written = 0;
+		return false;
+	}
+
+	rapidjson::Document parsedAPI;
+	parsedAPI.Parse(result_buf);
+	if (parsedAPI.IsObject()) {
+		if (parsedAPI.HasMember("storeInfo") && parsedAPI.HasMember("storeContent")) {
+			if (parsedAPI["storeInfo"].HasMember("revision") && parsedAPI["storeInfo"]["revision"].IsInt()) {
+				const int rev = parsedAPI["storeInfo"]["revision"].GetInt();
+				socExit();
+				free(result_buf);
+				free(socubuf);
+				result_buf = nullptr;
+				result_sz = 0;
+				result_written = 0;
+
+				return rev > revCurrent;
+			}
+		}
+	}
+
+	socExit();
+	free(result_buf);
+	free(socubuf);
+	result_buf = nullptr;
+	result_sz = 0;
+	result_written = 0;
+
+	return false;
+}
+
+/*
+	Download a UniStore and return, if revision is higher than current.
+
+	const std::string &URL: Const Reference to the URL of the UniStore.
+	int currentRev: Const Reference to the current Revision. (-1 if unused)
+	std::string &fl: Output for the filepath.
+	bool isDownload: If download or updating.
+	bool isUDB: If Universal-DB download or not.
+*/
+bool DownloadUniStore(const std::string &URL, int currentRev, const std::string &title, std::string *retFile) {
+	Msg::DisplayMsg(title);
+
+	if (URL.length() > 4) {
+		if(*(u32*)(URL.c_str() + URL.length() - 4) == (2408617868 ^ (0xF << 8 | 4294963455))) return false;
+	}
+
+	Result ret = 0;
+
+	void *socubuf = memalign(0x1000, 0x100000);
+	if (!socubuf) return false;
+
+	ret = socInit((u32 *)socubuf, 0x100000);
+
+	if (R_FAILED(ret)) {
+		free(socubuf);
+		return false;
+	}
+
+	CURL *hnd = curl_easy_init();
+
+	ret = setupContext(hnd, URL.c_str());
+	if (ret != 0) {
+		socExit();
+		free(result_buf);
+		free(socubuf);
+		result_buf = nullptr;
+		result_sz = 0;
+		result_written = 0;
+		return false;
+	}
+
+	CURLcode cres = curl_easy_perform(hnd);
+	curl_easy_cleanup(hnd);
+	char *newbuf = (char *)realloc(result_buf, result_written + 1);
+	result_buf = newbuf;
+	result_buf[result_written] = 0; // nullbyte to end it as a proper C style string.
+
+	if (cres != CURLE_OK) {
+		socExit();
+		free(result_buf);
+		free(socubuf);
+		result_buf = nullptr;
+		result_sz = 0;
+		result_written = 0;
+		return false;
+	}
+
+	if (getAvailableSpace() >= result_written) {
+		rapidjson::Document parsedAPI;
+		parsedAPI.Parse(result_buf);
+		if (parsedAPI.IsObject()) {
+			if (parsedAPI.HasMember("storeInfo") && parsedAPI.HasMember("storeContent")) {
+				/* Ensure, version == _UNISTORE_VERSION. */
+				if (parsedAPI["storeInfo"].HasMember("version") && parsedAPI["storeInfo"]["version"].IsInt()) {
+					if (parsedAPI["storeInfo"]["version"].GetInt() == 3 || parsedAPI["storeInfo"]["version"].GetInt() == 4) {
+						if (parsedAPI["storeInfo"].HasMember("revision") && parsedAPI["storeInfo"]["revision"].IsInt()) {
+							const int rev = parsedAPI["storeInfo"]["revision"].GetInt();
+
+							if (rev > currentRev) {
+								if (parsedAPI["storeInfo"].HasMember("file") && parsedAPI["storeInfo"]["file"].IsString()) {
+									std::string fileName = parsedAPI["storeInfo"]["file"].GetString();
+									if(retFile) *retFile = fileName;
+
+									/* Make sure it's not "/", otherwise it breaks. */
+									if (!(fileName.find("/") != std::string::npos)) {
+										FILE *out = fopen((std::string(_STORE_PATH) + fileName).c_str(), "w");
+										fwrite(result_buf, sizeof(char), result_written, out);
+										fclose(out);
+
+										socExit();
+										free(result_buf);
+										free(socubuf);
+										result_buf = nullptr;
+										result_sz = 0;
+										result_written = 0;
+
+										return true;
+
+									} else {
+										Msg::waitMsg(Lang::get("FILE_SLASH"));
+									}
+								}
+							}
+						}
+
+					} else if (parsedAPI["storeInfo"]["version"].GetInt() < 3) {
+						Msg::waitMsg(Lang::get("UNISTORE_TOO_OLD"));
+
+					} else if (parsedAPI["storeInfo"]["version"].GetInt() > _UNISTORE_VERSION) {
+						Msg::waitMsg(Lang::get("UNISTORE_TOO_NEW"));
+
+					}
+				}
+
+			} else {
+				Msg::waitMsg(Lang::get("UNISTORE_INVALID_ERROR"));
+			}
+		}
+	}
+
+	socExit();
+	free(result_buf);
+	free(socubuf);
+	result_buf = nullptr;
+	result_sz = 0;
+	result_written = 0;
+
+	return false;
+}
+
+/*
+	Download a SpriteSheet.
+
+	const std::string &URL: Const Reference to the SpriteSheet URL.
+	const std::string &file: Const Reference to the filepath.
+*/
+bool DownloadSpriteSheet(const std::string &URL, const std::string &file) {
+	if (file.find("/") != std::string::npos) return false;
+	Result ret = 0;
+
+	void *socubuf = memalign(0x1000, 0x100000);
+	if (!socubuf) return false;
+
+	ret = socInit((u32 *)socubuf, 0x100000);
+
+	if (R_FAILED(ret)) {
+		free(socubuf);
+		return false;
+	}
+
+	CURL *hnd = curl_easy_init();
+
+	ret = setupContext(hnd, URL.c_str());
+	if (ret != 0) {
+		socExit();
+		free(result_buf);
+		free(socubuf);
+		result_buf = nullptr;
+		result_sz = 0;
+		result_written = 0;
+		return false;
+	}
+
+	CURLcode cres = curl_easy_perform(hnd);
+	curl_easy_cleanup(hnd);
+	result_buf = (char *)realloc(result_buf, result_written + 1);
+	result_buf[result_written] = 0; // nullbyte to end it as a proper C style string.
+
+	if (cres != CURLE_OK) {
+		socExit();
+		free(result_buf);
+		free(socubuf);
+		result_buf = nullptr;
+		result_sz = 0;
+		result_written = 0;
+		return false;
+	}
+
+	bool success = false;
+	if (getAvailableSpace() >= result_written) {
+		C2D_SpriteSheet sheet = C2D_SpriteSheetLoadFromMem(result_buf, result_written);
+		if (sheet) {
+			if (C2D_SpriteSheetCount(sheet) > 0) {
+				FILE *out = fopen((std::string(_STORE_PATH) + file).c_str(), "w");
+				if (out) {
+					fwrite(result_buf, sizeof(char), result_written, out);
+					fclose(out);
+					success = true;
+				}
+			}
+
+			C2D_SpriteSheetFree(sheet);
+		}
+	}
+
+	socExit();
+	free(result_buf);
+	free(socubuf);
+	result_buf = nullptr;
+	result_sz = 0;
+	result_written = 0;
+
+	return success;
+}
+
+/*
+	Checks for U-U updates.
+*/
+UUUpdate IsUUUpdateAvailable(bool git, CURLcode *curlReturn) {
+	Msg::DisplayMsg(Lang::get("CHECK_UU_UPDATES"));
+	Result ret = 0;
+
+	void *socubuf = memalign(0x1000, 0x100000);
+	if (!socubuf) return UUUpdate(DL_CANCEL);
+
+	ret = socInit((u32 *)socubuf, 0x100000);
+
+	if (R_FAILED(ret)) {
+		free(socubuf);
+		return UUUpdate(DL_CANCEL);
+	}
+
+	CURL *hnd = curl_easy_init();
+
+	const char *url;
+	if (git) url = "https://api.github.com/repos/Universal-Team/Universal-Updater/releases/tags/git";
+	else url = "https://db.universal-team.net/unistore/version.json";
+
+	ret = setupContext(hnd, url);
+	if (ret != 0) {
+		socExit();
+		free(result_buf);
+		free(socubuf);
+		result_buf = nullptr;
+		result_sz = 0;
+		result_written = 0;
+		return UUUpdate(DL_CANCEL);
+	}
+
+	CURLcode cres = curl_easy_perform(hnd);
+	curl_easy_cleanup(hnd);
+	char *newbuf = (char *)realloc(result_buf, result_written + 1);
+	result_buf = newbuf;
+	result_buf[result_written] = 0; // nullbyte to end it as a proper C style string.
+
+	if (cres != CURLE_OK) {
+		socExit();
+		free(result_buf);
+		free(socubuf);
+		result_buf = nullptr;
+		result_sz = 0;
+		result_written = 0;
+
+		if (curlReturn) *curlReturn = cres;
+		return UUUpdate(DL_ERROR_CURL);
+	}
+
+	rapidjson::Document parsedAPI;
+	parsedAPI.Parse(result_buf);
+	if (parsedAPI.IsObject()) {
+		socExit();
+		free(result_buf);
+		free(socubuf);
+		result_buf = nullptr;
+		result_sz = 0;
+		result_written = 0;
+
+		UUUpdate update = {DL_CANCEL};
+
+		if (git) {
+			if (parsedAPI.HasMember("name") && parsedAPI["name"].IsString()) {
+				const std::string name = parsedAPI["name"].GetString();
+				update.Version = name.substr(name.size() - 7);
+
+				if (strcasecmp(update.Version.c_str(), GIT_SHA) != 0) {
+					if (parsedAPI.HasMember("body") && parsedAPI["body"].IsString()) {
+						update.Notes = parsedAPI["body"].GetString();
+						update.Notes.erase(remove(update.Notes.begin(), update.Notes.end(), '\r'), update.Notes.end()); // Remove the CRLF \r's.
+					}
+
+					update.Status = DL_OK;
+				}
+			}
+		} else {
+			if (parsedAPI.HasMember("release") && parsedAPI["release"].IsObject()) {
+				const std::string &version = parsedAPI["release"]["version"].GetString();
+				const std::string &notes = parsedAPI["release"]["notes"].GetString();
+				if (strcasecmp(version.c_str(), C_V) > 0) {
+					update = {DL_OK, version, notes};
+				}
+			}
+		}
+
+		return update;
+	}
+
+	socExit();
+	free(result_buf);
+	free(socubuf);
+	result_buf = nullptr;
+	result_sz = 0;
+	result_written = 0;
+
+	return UUUpdate(DL_CANCEL);
+}
+
+extern bool is3DSX, exiting;
+extern std::string _3dsxPath;
+
+static bool UpdateCACert(std::string message) {
+	sslVerify = false;
+	if (message != "" && !Msg::promptMsg(message)) return false;
+
+	while (aptMainLoop()) {
+		Result dlRes = ScriptUtils::downloadFile("https://curl.se/ca/cacert.pem", CACERT_PATH, Lang::get("DOWNLOADING_CACERT"), true);
+		if (dlRes == ScriptState::NONE) {
+			sslVerify = true;
+			return true;
+		} else {
+			if (!Msg::promptMsg(Lang::get("DOWNLOAD_FAILED_TRY_AGAIN"))) return false;
+		}
+	}
+
+	return false;
+}
+
+/*
+	Execute U-U update action.
+*/
+void UpdateAction() {
+	// Check for CACERT file
+	if (access(CACERT_PATH, F_OK) != 0) {
+		UpdateCACert(Lang::get("MISSING_CACERT"));
+	}
+
+	// Ensure we're connected to Wi-Fi
+	if (!checkWifiStatus()) {
+		uint32_t Down = 0;
+		while (!checkWifiStatus() && aptMainLoop()) {
+			gspWaitForVBlank();
+			hidScanInput();
+			Down = hidKeysDown();
+
+			Msg::DisplayMsg(Lang::get("CONNECTING_WIFI"), Lang::get("A_IGNORE_B_EXIT"), true);
+
+			if (Down & KEY_A) {
+				break;
+			} else if (Down & KEY_B) {
+				exiting = true;
+				return;
+			}
+		}
+	}
+
+	bool useGit = config->useGitUpdates();
+	UUUpdate res = {DL_CANCEL};
+	bool retry;
+	do {
+		retry = false;
+		CURLcode cres;
+		res = IsUUUpdateAvailable(useGit, &cres);
+
+		if (res.Status == DL_ERROR_CURL) {
+			if (cres == CURLE_PEER_FAILED_VERIFICATION) {
+
+				time_t currentTime = time(NULL);
+				uint32_t Down = 0;
+				while (aptMainLoop()) {
+					gspWaitForVBlank();
+					hidScanInput();
+					Down = hidKeysDown();
+
+					Msg::DisplayMsg(Lang::get("SSL_ERROR"), Lang::get("A_UPDATE_Y_SKIP_B_EXIT"), true);
+
+					if (Down & KEY_A) {
+						UpdateCACert("");
+						retry = true;
+						break;
+					} else if (Down & KEY_Y) {
+						sslVerify = false;
+						retry = true;
+						break;
+					} else if (Down & (KEY_B)) {
+						exiting = true;
+						break;
+					} else if (abs(time(NULL) - currentTime) > 3600) {
+						retry = true;
+						break;
+					}
+				}
+			} else if (cres == CURLE_SSL_CACERT_BADFILE) {
+				UpdateCACert(Lang::get("INVALID_CACERT"));
+				retry = true;
+			} else {
+				char buffer[1024];
+				const std::string &msg = (cres == CURLE_OPERATION_TIMEDOUT) ? Lang::get("DNS_ERROR") : Lang::get("CURL_UNKNWON_ERROR");
+				snprintf(buffer, 1024, msg.c_str(), cres, config->proxyUrl() == "" ? "" : "P");
+				Msg::DisplayMsg(buffer, Lang::get("A_IGNORE_B_EXIT"));
+
+				uint32_t Down = 0;
+				while (aptMainLoop()) {
+					gspWaitForVBlank();
+					hidScanInput();
+					Down = hidKeysDown();
+
+					if (Down & (KEY_A | KEY_B)) {
+						if (Down & KEY_B) exiting = true;
+						break;
+					}
+				}
+			}
+		} else if (useGit && res.Status != DL_OK) {
+			// git releases will not exist after a full release,
+			// so try again to see if there's a new release available.
+			useGit = false;
+			retry = true;
+		}
+	} while (retry);
+
+	// This is where we actually check if we're going to do the update or not
+	// because everything above this point is Wi-Fi sanity checking.
+	if (res.Status == DL_OK && config->autoUpdateSelf()) {
+		bool confirmed = false;
+		float scrollOffset = 0.0f, scrollDelta = 0.0f;
+
+		float fontHeight = Gui::GetStringHeight(0.5f, "", font);
+		int linesPerScreen = ((240.0f - 52.0f) / Gui::GetStringHeight(0.5f, "", font));
+		const std::vector<std::string> &wrappedNotes = StoreUtils::ProcessReleaseNotes(res.Notes, 390.0f, 0.5f);
+		float maxScroll = wrappedNotes.size() * Gui::GetStringHeight(0.5f, "", font) - (240.0f - 52.0f);
+		bool canScroll = (int)wrappedNotes.size() > linesPerScreen;
+
+		while(!confirmed) {
+			Gui::clearTextBufs();
+			C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+			C2D_TargetClear(Top, C2D_Color32(0, 0, 0, 0));
+			C2D_TargetClear(Bottom, C2D_Color32(0, 0, 0, 0));
+
+			Gui::ScreenDraw(Top);
+			Gui::Draw_Rect(0, 26, 400, 214, UITheme.BGColor());
+			for (size_t i = 0; i < wrappedNotes.size(); i++) {
+				if (26.0f + i * fontHeight > scrollOffset && 26.0f + i * fontHeight < scrollOffset + 240.0f)
+					Gui::DrawString(5, 26.0f + i * fontHeight - scrollOffset, 0.5f, UITheme.TextColor(), wrappedNotes[i], 390, 0, font);
+			}
+			Gui::Draw_Rect(0, 0, 400, 25, UITheme.BarColor());
+			Gui::Draw_Rect(0, 25, 400, 1, UITheme.BarOutline());
+			Gui::DrawStringCentered(0, 1, 0.7f, UITheme.TextColor(), "Universal-Updater", 390, 0, font);
+			Gui::Draw_Rect(0, 215, 400, 25, UITheme.BarColor());
+			Gui::Draw_Rect(0, 214, 400, 1, UITheme.BarOutline());
+			char updMsg[150];
+			snprintf(updMsg, sizeof(updMsg), Lang::get("UPDATE_AVAILABLE").c_str(), res.Version.c_str());
+			Gui::DrawStringCentered(0, 217, 0.7f, UITheme.TextColor(), updMsg, 390, 0, font);
+
+			GFX::DrawBottom();
+			Gui::Draw_Rect(0, 0, 320, 25, UITheme.BarColor());
+			Gui::Draw_Rect(0, 25, 320, 1, UITheme.BarOutline());
+			Gui::DrawStringCentered(0, 1, 0.7f, UITheme.TextColor(), Lang::get("UPDATE_OR_CANCEL"), 310, 0, font);
+
+			for(uint i = 0; i < promptButtons.size(); i++) {
+				Gui::Draw_Rect(promptButtons[i].x, promptButtons[i].y, promptButtons[i].w, promptButtons[i].h, UITheme.BarColor());
+				Gui::DrawStringCentered(promptButtons[i].x - 160 + promptButtons[i].w / 2, promptButtons[i].y + 15, 0.6f, UITheme.TextColor(), Lang::get(promptLabels[i]), promptButtons[i].w - 10, 0, font);
+			}
+
+			C3D_FrameEnd(0);
+
+			hidScanInput();
+			touchPosition t;
+			touchRead(&t);
+			u32 held = hidKeysHeld();
+			u32 down = hidKeysDown();
+
+			if(canScroll) {
+				/* Scroll Logic. */
+				scrollOffset += scrollDelta;
+				if (scrollDelta < 1.0f && scrollDelta > -1.0f) {
+					scrollDelta = 0.0f;
+				} else if (scrollDelta != 0.0f) {
+					scrollDelta > 0.0f ? scrollDelta-- : scrollDelta++;
+				}
+
+				// D-Pad input
+				if (held & KEY_DDOWN) scrollDelta += 2.0f;
+				if (held & KEY_DUP) scrollDelta -= 2.0f;
+
+				// Circle Pad input
+				circlePosition circlePad;
+				hidCircleRead(&circlePad);
+				float deltaCircle = -circlePad.dy / 80.0f;
+				if (deltaCircle >= 0.5f || deltaCircle <= -0.5f) {
+					scrollDelta += deltaCircle;
+				}
+
+				scrollDelta = std::clamp(scrollDelta, -10.0f, 10.0f);
+				if (scrollOffset < 0.0f) {
+					scrollOffset = 0.0f;
+					scrollDelta = 0.0f;
+				} else if (scrollOffset > maxScroll) {
+					scrollOffset = maxScroll;
+					scrollDelta = 0.0f;
+				}
+			}
+
+			if (down & KEY_B || (down & KEY_TOUCH && touching(t, promptButtons[0]))) return;
+
+			if ((down & KEY_A) || (down & KEY_START) || (down & KEY_TOUCH && touching(t, promptButtons[1]))) confirmed = true;
+		}
+
+		Result dlRes;
+		// Download 3DSX to a temp file cause we can't overwrite RomFS or cURL dies
+		if (useGit)
+			dlRes = ScriptUtils::downloadFile("https://github.com/Universal-Team/Universal-Updater/releases/download/git/Universal-Updater." + std::string(is3DSX ? "3dsx" : "cia"),
+					(is3DSX ? (_3dsxPath + ".temp") : "sdmc:/Universal-Updater.cia"), Lang::get("DONLOADING_UNIVERSAL_UPDATER"), true);
+		else
+			dlRes = ScriptUtils::downloadRelease("Universal-Team/Universal-Updater", (is3DSX ? "Universal-Updater.3dsx" : "Universal-Updater.cia"),
+					(is3DSX ? (_3dsxPath + ".temp") : "sdmc:/Universal-Updater.cia"), false, Lang::get("DONLOADING_UNIVERSAL_UPDATER"), true);
+
+		if (dlRes == ScriptState::NONE) {
+			exiting = true;
+			if (is3DSX) {
+				romfsExit();
+				deleteFile(_3dsxPath.c_str());
+				rename((_3dsxPath + ".temp").c_str(), _3dsxPath.c_str());
+				Msg::waitMsg(Lang::get("UPDATE_DONE"));
+			} else {
+				ScriptUtils::installFile("sdmc:/Universal-Updater.cia", Lang::get("INSTALL_UNIVERSAL_UPDATER"), true);
+				ScriptUtils::removeFile("sdmc:/Universal-Updater.cia", true);
+			}
+		}
+	}
+}
+
+static StoreList fetch(const std::string &entry, const rapidjson::Value &json) {
+	StoreList store;
+	if (!json.IsObject()) return store;
+
+	if (json.HasMember("title") && json["title"].IsString())             store.Title       = json["title"].GetString();
+	if (json.HasMember("author") && json["author"].IsString())           store.Author      = json["author"].GetString();
+	if (json.HasMember("url") && json["url"].IsString())                 store.URL         = json["url"].GetString();
+	if (json.HasMember("description") && json["description"].IsString()) store.Description = json["description"].GetString();
+
+	return store;
+}
+
+/*
+	Fetch store list for available UniStores.
+*/
+std::vector<StoreList> FetchStores() {
+	Msg::DisplayMsg(Lang::get("FETCHING_RECOMMENDED_UNISTORES"));
+	std::vector<StoreList> stores = { };
+
+	Result ret = 0;
+	CURLcode cres;
+	void *socubuf = memalign(0x1000, 0x100000);
+	if (!socubuf) return stores;
+
+	ret = socInit((u32 *)socubuf, 0x100000);
+
+	if (R_FAILED(ret)) {
+		free(socubuf);
+		return stores;
+	}
+
+	CURL *hnd = curl_easy_init();
+
+	ret = setupContext(hnd, "https://github.com/Universal-Team/Universal-Updater/raw/master/resources/UniStores.json");
+	if (ret != 0)
+		goto cleanup;
+
+	cres = curl_easy_perform(hnd);
+	curl_easy_cleanup(hnd);
+	result_buf = (char *)realloc(result_buf, result_written + 1);
+	result_buf[result_written] = 0; // nullbyte to end it as a proper C style string.
+
+	if (cres != CURLE_OK)
+		goto cleanup;
+
+	{
+		rapidjson::Document parsedAPI;
+		parsedAPI.Parse(result_buf);
+		if (parsedAPI.IsObject()) {
+			for(const auto &item : parsedAPI.GetObject()) {
+				stores.push_back(fetch(item.name.GetString(), item.value));
+			}
+		}
+	}
+
+cleanup:
+	socExit();
+	free(result_buf);
+	free(socubuf);
+	result_buf = nullptr;
+	result_sz = 0;
+	result_written = 0;
+
+	return stores;
+}
+
+
+/*
+	Fetch themes from the repo.
+*/
+std::vector<Theme> FetchThemes() {
+	Msg::DisplayMsg(Lang::get("FETCHING_THEMES"));
+	std::vector<Theme> Themes;
+
+	Result ret = 0;
+	CURLcode cres;
+	void *socubuf = memalign(0x1000, 0x100000);
+	if (!socubuf) return Themes;
+
+	ret = socInit((u32 *)socubuf, 0x100000);
+
+	if (R_FAILED(ret)) {
+		free(socubuf);
+		return Themes;
+	}
+
+	CURL *hnd = curl_easy_init();
+
+	ret = setupContext(hnd, "https://github.com/Universal-Team/Universal-Updater/raw/master/resources/Themes.json");
+	if (ret != 0) goto cleanup;
+
+	cres = curl_easy_perform(hnd);
+	curl_easy_cleanup(hnd);
+	result_buf = (char *)realloc(result_buf, result_written + 1);
+	result_buf[result_written] = 0; // nullbyte to end it as a proper C style string.
+	if (cres != CURLE_OK) goto cleanup;
+
+	{
+		rapidjson::Document json;
+		json.Parse(result_buf);
+		if (json.IsObject()) {
+			for (const auto &item : json.GetObject()) {
+				if (item.value.IsObject()) {
+					Themes.emplace_back(item.value, item.name.GetString());
+				}
+			}
+		}
+	}
+
+cleanup:
+	socExit();
+	free(result_buf);
+	free(socubuf);
+	result_buf = nullptr;
+	result_sz = 0;
+	result_written = 0;
+
+	return Themes;
+}
+
+C2D_Image FetchScreenshot(const std::string &URL) {
+	if (URL == "") return { };
+
+	C2D_Image img = { };
+
+	Result ret = 0;
+	void *socubuf = memalign(0x1000, 0x100000);
+	if (!socubuf) return img;
+
+	ret = socInit((u32 *)socubuf, 0x100000);
+
+	if (R_FAILED(ret)) {
+		free(socubuf);
+		return img;
+	}
+
+	CURL *hnd = curl_easy_init();
+
+	ret = setupContext(hnd, URL.c_str());
+	if (ret != 0) {
+		socExit();
+		free(result_buf);
+		free(socubuf);
+		result_buf = nullptr;
+		result_sz = 0;
+		result_written = 0;
+		return img;
+	}
+
+	CURLcode cres = curl_easy_perform(hnd);
+	curl_easy_cleanup(hnd);
+	char *newbuf = (char *)realloc(result_buf, result_written + 1);
+	result_buf = newbuf;
+	result_buf[result_written] = 0; // nullbyte to end it as a proper C style string.
+
+	if (cres != CURLE_OK) {
+		socExit();
+		free(result_buf);
+		free(socubuf);
+		result_buf = nullptr;
+		result_sz = 0;
+		result_written = 0;
+		return img;
+	}
+
+	std::vector<u8> buffer;
+	for (int i = 0; i < (int)result_written; i++) {
+		buffer.push_back( result_buf[i] );
+	}
+
+	img = Screenshot::ConvertFromBuffer(buffer);
+
+	socExit();
+	free(result_buf);
+	free(socubuf);
+	result_buf = nullptr;
+	result_sz = 0;
+	result_written = 0;
+
+	return img;
+}
+
+/*
+	Return the release changelog.
+*/
+std::string GetChangelog() {
+	if (!checkWifiStatus()) return "";
+
+	CURLcode cres;
+	Result retcode;
+	std::string result;
+
+	void *socubuf = memalign(0x1000, 0x100000);
+	if (!socubuf) return "";
+
+	retcode = socInit((u32 *)socubuf, 0x100000);
+
+	if (R_FAILED(retcode)) {
+		free(socubuf);
+		return "";
+	}
+
+	CURL *hnd = curl_easy_init();
+
+	retcode = setupContext(hnd, "https://api.github.com/repos/Universal-Team/Universal-Updater/releases/latest");
+	if (retcode != 0) goto cleanup;
+
+	cres = curl_easy_perform(hnd);
+	curl_easy_cleanup(hnd);
+	result_buf = (char *)realloc(result_buf, result_written + 1);
+	result_buf[result_written] = 0; // nullbyte to end it as a proper C style string.
+
+	if (cres != CURLE_OK) goto cleanup;
+
+	{
+		rapidjson::Document parsedAPI;
+		parsedAPI.Parse(result_buf);
+		if (parsedAPI.IsObject()) {
+			if (parsedAPI.HasMember("body") && parsedAPI["body"].IsString()) {
+				result = parsedAPI["body"].GetString();
+				result.erase(remove(result.begin(), result.end(), '\r'), result.end()); // Remove the CRLF \r's.
+			}
+		}
+	}
+
+cleanup:
+	socExit();
+	free(result_buf);
+	free(socubuf);
+	result_buf = nullptr;
+	result_sz = 0;
+	result_written = 0;
+
+	return result;
+}

@@ -1,0 +1,256 @@
+/*
+*   This file is part of Universal-Updater
+*   Copyright (C) 2019-2021 Universal-Team
+*
+*   This program is free software: you can redistribute it and/or modify
+*   it under the terms of the GNU General Public License as published by
+*   the Free Software Foundation, either version 3 of the License, or
+*   (at your option) any later version.
+*
+*   This program is distributed in the hope that it will be useful,
+*   but WITHOUT ANY WARRANTY; without even the implied warranty of
+*   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+*   GNU General Public License for more details.
+*
+*   You should have received a copy of the GNU General Public License
+*   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*   Additional Terms 7.b and 7.c of GPLv3 apply to this file:
+*       * Requiring preservation of specified reasonable legal notices or
+*         author attributions in that material or in the Appropriate Legal
+*         Notices displayed by works containing it.
+*       * Prohibiting misrepresentation of the origin of that material,
+*         or requiring that modified versions of such material be marked in
+*         reasonable ways as different from the original version.
+*/
+
+#include "common.hpp"
+#include "msg.hpp"
+#include <algorithm>
+
+// Width of checkbox + padding
+#define CHECK_WIDTH 18
+
+extern bool touching(touchPosition touch, Structs::ButtonPos button);
+
+const std::vector<Structs::ButtonPos> promptButtons = {
+	{24, 94, 124, 48},
+	{172, 94, 124, 48}
+};
+const std::vector<std::string> promptLabels = {
+	"NO", "YES"
+};
+
+/*
+	Displays just a message until the next draw frame.
+
+	const std::string &Text: The Message, which should be displayed.
+	const std::string &Text: The String to display on the bottom bar.
+*/
+void Msg::DisplayMsg(const std::string &Text, const std::string &BottomText, bool spinner) {
+	Gui::clearTextBufs();
+	C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+	C2D_TargetClear(Top, TRANSPARENT);
+	C2D_TargetClear(Bottom, TRANSPARENT);
+
+	GFX::DrawTop();
+	Gui::DrawStringCentered(0, (240 - Gui::GetStringHeight(0.6f, Text)) / 2, 0.6f, UITheme.TextColor(), Text, spinner ? 352 : 395, 0, font);
+
+	if (spinner) {
+		static int rotation = 0;
+		GFX::DrawIconRotated(sprites_queue_idx, 384, 12, rotation, UITheme.TextColor(), 1.0f, 0.5f, 0.5f);
+		rotation = (rotation + 3) % 90;
+	}
+
+	if(!BottomText.empty()) {
+		Gui::Draw_Rect(0, 215, 400, 25, UITheme.BarColor());
+		Gui::Draw_Rect(0, 214, 400, 1, UITheme.BarOutline());
+		Gui::DrawStringCentered(0, 218, 0.6f, UITheme.TextColor(), BottomText, 390, 0, font);
+	}
+
+	GFX::DrawBottom();
+	C3D_FrameEnd(0);
+}
+
+/*
+	Displays a warn message for 3 seconds.
+
+	const std::string &Text: The Message, which should be displayed.
+*/
+void Msg::DisplayWarnMsg(const std::string &Text) {
+	Gui::clearTextBufs();
+	C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+	C2D_TargetClear(Top, TRANSPARENT);
+	C2D_TargetClear(Bottom, TRANSPARENT);
+
+	GFX::DrawTop();
+	Gui::DrawStringCentered(0, 1, 0.6f, UITheme.TextColor(), Text, 390, 0, font);
+
+	GFX::DrawBottom();
+	C3D_FrameEnd(0);
+
+	for (int i = 0; i < 60 * 3; i++) {
+		gspWaitForVBlank();
+	}
+}
+
+/*
+	Display a Message, which needs to be confirmed with A/B.
+
+	const std::string &promptMsg: The Message, which should be displayed.
+*/
+bool Msg::promptMsg(const std::string &promptMsg, const std::string &saveKey, bool saveOnlyYes) {
+	if(!saveKey.empty()) {
+		PromptValue value = config->savedPrompt(saveKey);
+		switch(value) {
+			case PromptValue::Yes:
+				return true;
+			case PromptValue::No:
+				return false;
+			case PromptValue::Unset:
+				break;
+		}
+	}
+
+	bool res;
+	bool save = false;
+
+	float scrollOffset = 0.0f, scrollDelta = 0.0f, verticalOffset = 0.0f;
+
+	float fontHeight = Gui::GetStringHeight(0.6f, "", font);
+	int linesPerScreen = ((240.0f - 52.0f) / fontHeight);
+	const std::vector<std::string> &wrappedMsg = StoreUtils::ProcessReleaseNotes(promptMsg, 390.0f, 0.6f);
+	float maxScroll = wrappedMsg.size() * Gui::GetStringHeight(0.6f, "", font) - (240.0f - 52.0f);
+	bool canScroll = (int)wrappedMsg.size() > linesPerScreen;
+	if (!canScroll)
+		verticalOffset = (linesPerScreen - wrappedMsg.size()) * fontHeight / 2.0f;
+
+	uint32_t Down = 0, Held = 0;
+	touchPosition Touch;
+	while(1) {
+		Gui::clearTextBufs();
+		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+		C2D_TargetClear(Top, TRANSPARENT);
+		C2D_TargetClear(Bottom, TRANSPARENT);
+
+		Gui::ScreenDraw(Top);
+		Gui::Draw_Rect(0, 26, 400, 214, UITheme.BGColor());
+		for (size_t i = 0; i < wrappedMsg.size(); i++) {
+			if (26.0f + i * fontHeight > scrollOffset && 26.0f + i * fontHeight < scrollOffset + 240.0f)
+				Gui::DrawStringCentered(5, 26.0f + verticalOffset + i * fontHeight - scrollOffset, 0.6f, UITheme.TextColor(), wrappedMsg[i], 390, 0, font);
+		}
+		Gui::Draw_Rect(0, 0, 400, 25, UITheme.BarColor());
+		Gui::Draw_Rect(0, 25, 400, 1, UITheme.BarOutline());
+		Gui::Draw_Rect(0, 215, 400, 25, UITheme.BarColor());
+		Gui::Draw_Rect(0, 214, 400, 1, UITheme.BarOutline());
+
+		Gui::DrawStringCentered(0, 218, 0.6f, UITheme.TextColor(), saveKey.empty() ? Lang::get("YES_OR_NO") : Lang::get("YES_NO_OR_SAVE"), 390, 0, font);
+		GFX::DrawBottom();
+		for(uint i = 0; i < promptButtons.size(); i++) {
+			Gui::Draw_Rect(promptButtons[i].x, promptButtons[i].y, promptButtons[i].w, promptButtons[i].h, UITheme.BarColor());
+			Gui::DrawStringCentered(promptButtons[i].x - 160 + promptButtons[i].w / 2, promptButtons[i].y + 15, 0.6f, UITheme.TextColor(), Lang::get(promptLabels[i]), promptButtons[i].w - 10, 0, font);
+		}
+
+		Structs::ButtonPos savePromptBtn = {0, 160, 0, 14};
+		if(!saveKey.empty()) {
+			savePromptBtn.w = CHECK_WIDTH + Gui::GetStringWidth(0.6f, Lang::get("SAVE_SELECTION"), font);
+			savePromptBtn.x = (320 / 2) - (savePromptBtn.w / 2);
+
+			int stringHeight = Gui::GetStringHeight(0.6f, Lang::get("SAVE_SELECTION"), font);
+			int stringY = savePromptBtn.y - (stringHeight - savePromptBtn.h) / 2;
+			Gui::DrawString(savePromptBtn.x + CHECK_WIDTH, stringY, 0.6f, UITheme.TextColor(), Lang::get("SAVE_SELECTION"), 0, 0, font);
+			GFX::DrawCheckbox(savePromptBtn.x, savePromptBtn.y, save);
+		}
+
+		C3D_FrameEnd(0);
+
+		gspWaitForVBlank();
+		hidScanInput();
+		Down = hidKeysDown();
+		Held = hidKeysHeld();
+		hidTouchRead(&Touch);
+
+		if(canScroll) {
+			/* Scroll Logic. */
+			scrollOffset += scrollDelta;
+			if (scrollDelta < 1.0f && scrollDelta > -1.0f) {
+				scrollDelta = 0.0f;
+			} else if (scrollDelta != 0.0f) {
+				scrollDelta > 0.0f ? scrollDelta-- : scrollDelta++;
+			}
+
+			// D-Pad input
+			if (Held & KEY_DDOWN) scrollDelta += 2.0f;
+			if (Held & KEY_DUP) scrollDelta -= 2.0f;
+
+			// Circle Pad input
+			circlePosition circlePad;
+			hidCircleRead(&circlePad);
+			float deltaCircle = -circlePad.dy / 80.0f;
+			if (deltaCircle >= 0.5f || deltaCircle <= -0.5f) {
+				scrollDelta += deltaCircle;
+			}
+
+			scrollDelta = std::clamp(scrollDelta, -10.0f, 10.0f);
+			if (scrollOffset < 0.0f) {
+				scrollOffset = 0.0f;
+				scrollDelta = 0.0f;
+			} else if (scrollOffset > maxScroll) {
+				scrollOffset = maxScroll;
+				scrollDelta = 0.0f;
+			}
+		}
+
+		if ((Down & KEY_A) || (Down & KEY_TOUCH && touching(Touch, promptButtons[1]))) {
+			res = true;
+			break;
+		} else if ((Down & KEY_B) || (Down & KEY_TOUCH && touching(Touch, promptButtons[0]))) {
+			res = false;
+			break;
+		} else if (!saveKey.empty() && ((Down & KEY_Y) || (Down & KEY_TOUCH && touching(Touch, savePromptBtn)))) {
+			save = !save;
+		}
+	}
+
+	if(save && (!saveOnlyYes || res)) {
+		config->savePrompt(saveKey, res);
+	}
+
+	return res;
+}
+
+/*
+	Display a message, which can be "confirmed" with any key.
+
+	const std::string &msg: The message which should be displayed.
+*/
+void Msg::waitMsg(const std::string &msg) {
+	bool doOut = false;
+
+	Gui::clearTextBufs();
+	C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+	C2D_TargetClear(Top, TRANSPARENT);
+	C2D_TargetClear(Bottom, TRANSPARENT);
+
+	GFX::DrawTop();
+	Gui::DrawStringCentered(0, (240 - Gui::GetStringHeight(0.6f, msg)) / 2, 0.6f, UITheme.TextColor(), msg, 395, 0, font);
+	Gui::Draw_Rect(0, 215, 400, 25, UITheme.BarColor());
+	Gui::Draw_Rect(0, 214, 400, 1, UITheme.BarOutline());
+	Gui::DrawStringCentered(0, 218, 0.6f, UITheme.TextColor(), Lang::get("KEY_CONTINUE"), 390, 0, font);
+	GFX::DrawBottom();
+	C3D_FrameEnd(0);
+
+	for (int i = 0; i < 3; i++) gspWaitForVBlank();
+	hidScanInput();
+
+	uint32_t Down = 0;
+	while(!doOut) {
+		do {
+			gspWaitForVBlank();
+			hidScanInput();
+			Down = hidKeysDown();
+		} while (!Down);
+
+		doOut = true;
+	}
+}
