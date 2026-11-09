@@ -268,3 +268,41 @@ void KUI::Badge(float cx, float cy, const std::string &label) {
 	Pill(cx - w / 2.0f, cy - 7, w, 14, BADGE);
 	TextCentered(cx, cy - 7, size, WHITE, label);
 }
+
+void KUI::Tile(float cx, float cy, float s, float t, u32 c) {
+	(void)t;
+	RoundRect(cx - s / 2.0f, cy - s / 2.0f, s, s, s * 0.3f, c);
+}
+
+void KUI::Pattern(float w, float h, float t, u32 c) {
+	const float step = 44.0f, size = 26.0f;
+	const float off = fmodf(t, step);
+	for (int row = -1; row * step < h + step; row++) {
+		const float y = row * step + off;
+		const float shift = (row & 1) ? step / 2.0f : 0.0f;
+		for (int col = -1; col * step < w + step; col++) {
+			Tile(col * step + shift + off, y, size, 0, c);
+		}
+	}
+}
+
+void KUI::Ribbon(float x, float y, float w, const std::string &label, u32 fill) {
+	const u32 dark = Darken(fill, 0.25f);
+	C2D_DrawTriangle(x, y + 12, dark, x + 5, y + 12, dark, x + 5, y + 16, dark, DEPTH);
+	C2D_DrawTriangle(x + w, y + 12, dark, x + w - 5, y + 12, dark, x + w - 5, y + 16, dark, DEPTH);
+	RoundRect(x, y, w, 13, 4, fill);
+	TextCentered(x + w / 2.0f, y - 0.5f, 0.36f, WHITE, label);
+}
+
+void KUI::Bag(float cx, float cy, float s, u32 body, u32 cutout, float squash) {
+	const float w = s * (1.0f + squash), h = s * 0.82f * (1.0f - squash);
+	const float bottom = cy + s * 0.5f;
+	const float top = bottom - h;
+	/* Handle: top half of a ring sitting on the body. */
+	const float hr = s * 0.24f * (1.0f + squash * 0.5f);
+	Ring(cx, top + 1, hr, std::max(2.0f, s * 0.09f), 0.75f, 1.25f, body);
+	RoundRect(cx - w / 2.0f, top, w, h, s * 0.16f, body);
+	const float hole = std::max(1.5f, s * 0.055f);
+	Circle(cx - hr + s * 0.045f, top + s * 0.16f, hole, cutout);
+	Circle(cx + hr - s * 0.045f, top + s * 0.16f, hole, cutout);
+}

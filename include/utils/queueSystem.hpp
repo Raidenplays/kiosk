@@ -30,6 +30,9 @@
 #include <citro2d.h>
 #include <deque>
 #include <memory>
+#include <string>
+
+class StoreEntry;
 
 /* Extend this, if more statuses are neccessary. */
 enum class QueueStatus {
@@ -64,6 +67,11 @@ namespace QueueSystem {
 	void AddToQueue(const std::shared_ptr<StoreEntry> &entry, int script); // Adds to Queue.
 	void ClearQueue(); // Clears the Queue.
 	void Resume();
+
+	/* Kiosk: the last finished item, so the UI can celebrate (or not). */
+	extern int FinishedSerial;
+	extern bool LastOk;
+	extern std::shared_ptr<StoreEntry> LastEntry;
 };
 
 struct QueueEntry {

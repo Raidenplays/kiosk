@@ -30,6 +30,7 @@
 #include "init.hpp"
 #include "kioskScreen.hpp"
 #include "queueSystem.hpp"
+#include "sfx.hpp"
 #include "sound.hpp"
 
 #include <dirent.h>
@@ -50,32 +51,6 @@ static void getCurrentUsage() {
 	u64 id;
 	APT_GetProgramID(&id);
 	is3DSX = (id != UU_TITLE_ID);
-}
-
-/*
-	Init Music.
-*/
-static void InitMusic() {
-	if (access("sdmc:/3ds/dspfirm.cdc", F_OK) == 0) { // Ensure dspfirm dump exist.
-		if (access("sdmc:/3ds/Universal-Updater/music.wav", F_OK) == 0) { // Ensure music.wav exist.
-			dspfirmFound = true;
-			ndspInit();
-			Music = std::make_unique<Sound>("sdmc:/3ds/Universal-Updater/music.wav");
-
-			Music->play();
-		}
-	}
-}
-
-/*
-	Exit Music.
-*/
-static void ExitMusic() {
-	if (dspfirmFound) {
-		Music->stop();
-		Music = nullptr;
-		ndspExit();
-	}
 }
 
 /*
@@ -163,8 +138,8 @@ Result Init::Initialize() {
 
 	/* No self-update here: UpdateAction() would replace Kiosk with Universal-Updater. */
 
+	Sfx::Init(); // Before the screen, so the music plays while the store loads.
 	Gui::setScreen(std::make_unique<KioskScreen>(), false, false);
-	InitMusic();
 
 	return 0;
 }
@@ -227,7 +202,7 @@ Result Init::Exit() {
 	Gui::exit();
 	Gui::unloadSheet(sprites);
 	UnloadFont();
-	ExitMusic();
+	Sfx::Exit();
 	gfxExit();
 	cfguExit();
 	config->save();

@@ -13,18 +13,21 @@
 namespace KUI {
 	constexpr u32 RGBA(u8 r, u8 g, u8 b, u8 a = 255) { return (u32)r | ((u32)g << 8) | ((u32)b << 16) | ((u32)a << 24); }
 
-	/* Palette. */
-	constexpr u32 BG          = RGBA(244, 245, 247);
+	/* Palette: warm cream base, orange cursor/accent, sky-blue secondary. */
+	constexpr u32 BG          = RGBA(248, 243, 229);
+	constexpr u32 BG_DOT      = RGBA(240, 233, 214);
 	constexpr u32 CARD        = RGBA(255, 255, 255);
-	constexpr u32 CARD_SHADOW = RGBA(222, 225, 230);
-	constexpr u32 TEXT        = RGBA(30, 34, 40);
-	constexpr u32 SUB         = RGBA(112, 118, 128);
-	constexpr u32 LINE        = RGBA(228, 230, 234);
-	constexpr u32 ACCENT      = RGBA(255, 106, 19);
-	constexpr u32 ACCENT_SOFT = RGBA(255, 232, 216);
-	constexpr u32 BADGE       = RGBA(229, 56, 59);
-	constexpr u32 GOOD        = RGBA(31, 163, 91);
-	constexpr u32 MUTED       = RGBA(232, 234, 238);
+	constexpr u32 CARD_SHADOW = RGBA(226, 216, 192);
+	constexpr u32 TEXT        = RGBA(58, 52, 44);
+	constexpr u32 SUB         = RGBA(140, 128, 110);
+	constexpr u32 LINE        = RGBA(232, 222, 198);
+	constexpr u32 ACCENT      = RGBA(247, 126, 20);
+	constexpr u32 ACCENT_SOFT = RGBA(255, 230, 200);
+	constexpr u32 SKY         = RGBA(74, 182, 236);
+	constexpr u32 SKY_SOFT    = RGBA(214, 240, 252);
+	constexpr u32 BADGE       = RGBA(232, 64, 60);
+	constexpr u32 GOOD        = RGBA(64, 176, 84);
+	constexpr u32 MUTED       = RGBA(238, 230, 212);
 	#ifndef WHITE
 	#define WHITE C2D_Color32(255, 255, 255, 255)
 	#endif
@@ -52,6 +55,10 @@ namespace KUI {
 	void Check(float cx, float cy, float s, u32 c);
 	void Chevron(float cx, float cy, float s, bool left, u32 c);
 	void House(float cx, float cy, float s, u32 c);
+	void Tile(float cx, float cy, float s, float t, u32 c); // Small rounded square (pattern/confetti).
+	void Pattern(float w, float h, float t, u32 c);      // Drifting rounded-square wallpaper.
+	void Ribbon(float x, float y, float w, const std::string &label, u32 fill);
+	void Bag(float cx, float cy, float s, u32 body, u32 cutout, float squash = 0.0f);
 
 	/* Text. */
 	float TextWidth(float size, const std::string &s);

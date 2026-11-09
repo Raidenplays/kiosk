@@ -25,6 +25,9 @@
 */
 
 #include "animation.hpp"
+#include "kui.hpp"
+#include <algorithm>
+#include <cmath>
 #include "common.hpp"
 #include "queueSystem.hpp"
 #include "stringutils.hpp"
@@ -60,75 +63,60 @@ void Animation::DrawProgressBar(u64 currentProgress, u64 totalProgress) {
 	Display the progressbar.
 */
 void Animation::displayProgressBar() {
+	using namespace KUI;
 	char str[256];
-
-	while(showProgressBar) {
-		switch(progressbarType) {
+	int frame = 0;
+	while (showProgressBar) {
+		u64 cur = 0, total = 1;
+		const char *verb = "Working";
+		str[0] = '\0';
+		switch (progressbarType) {
 			case ProgressBar::Downloading:
 				if (downloadTotal < 1.0f) downloadTotal = 1.0f;
 				if (downloadTotal < downloadNow) downloadTotal = downloadNow;
-
-				snprintf(str, sizeof(str), "%s / %s (%.2f%%)",
-						StringUtils::formatBytes(downloadNow).c_str(),
-						StringUtils::formatBytes(downloadTotal).c_str(),
-						((float)downloadNow/(float)downloadTotal) * 100.0f);
+				cur = downloadNow; total = downloadTotal; verb = "Downloading";
 				break;
-
 			case ProgressBar::Extracting:
-				snprintf(str, sizeof(str), "%s / %s (%.2f%%)",
-						StringUtils::formatBytes(writeOffset).c_str(),
-						StringUtils::formatBytes(extractSize).c_str(),
-						((float)writeOffset/(float)extractSize) * 100.0f);
+				cur = writeOffset; total = extractSize; verb = "Unpacking";
 				break;
-
 			case ProgressBar::Installing:
-				snprintf(str, sizeof(str), "%s / %s (%.2f%%)",
-						StringUtils::formatBytes(installOffset).c_str(),
-						StringUtils::formatBytes(installSize).c_str(),
-						((float)installOffset/(float)installSize) * 100.0f);
+				cur = installOffset; total = installSize; verb = "Installing";
 				break;
-
 			case ProgressBar::Copying:
-				snprintf(str, sizeof(str), "%s / %s (%.2f%%)",
-						StringUtils::formatBytes(copyOffset).c_str(),
-						StringUtils::formatBytes(copySize).c_str(),
-						((float)copyOffset/(float)copySize) * 100.0f);
+				cur = copyOffset; total = copySize; verb = "Copying";
 				break;
 		}
+		if (total == 0) total = 1;
+		const float p = std::clamp((float)cur / (float)total, 0.0f, 1.0f);
+		snprintf(str, sizeof(str), "%s of %s", StringUtils::formatBytes(cur).c_str(), StringUtils::formatBytes(total).c_str());
+		frame++;
 
 		Gui::clearTextBufs();
 		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 		C2D_TargetClear(Top, TRANSPARENT);
 		C2D_TargetClear(Bottom, TRANSPARENT);
-		GFX::DrawTop();
-		Gui::DrawStringCentered(0, 1, 0.7f, UITheme.TextColor(), progressBarMsg, 390, 0, font);
 
-		switch(progressbarType) {
-			case ProgressBar::Downloading:
-				Gui::DrawStringCentered(0, 80, 0.6f, UITheme.TextColor(), str, 390, 0, font);
-				Animation::DrawProgressBar(downloadNow, downloadTotal);
-				break;
+		Gui::ScreenDraw(Top);
+		Rect(0, 0, 400, 240, BG);
+		Pattern(400, 240, frame * 0.25f, BG_DOT);
+		Rect(0, 0, 400, 22, CARD);
+		Rect(0, 22, 400, 1, LINE);
+		Pill(6, 3, 64, 16, SKY);
+		TextCentered(38, 3, 0.4f, WHITE, "Kiosk");
 
-			case ProgressBar::Extracting:
-				Gui::DrawStringCentered(0, 180, 0.6f, UITheme.TextColor(), str, 390, 0, font);
-				Gui::DrawStringCentered(0, 100, 0.6f, UITheme.TextColor(), std::to_string(filesExtracted) + " / " + std::to_string(extractFilesCount) + " " + (filesExtracted == 1 ? (Lang::get("FILE_EXTRACTED")).c_str() :(Lang::get("FILES_EXTRACTED"))), 390, 0, font);
-				Gui::DrawStringCentered(0, 40, 0.6f, UITheme.TextColor(), Lang::get("CURRENTLY_EXTRACTING"), 390, 0, font);
-				Gui::DrawStringCentered(0, 70, 0.6f, UITheme.TextColor(), extractingFile, 390, 0, font);
-				Animation::DrawProgressBar(writeOffset, extractSize);
-				break;
+		const float hop = fabsf(sinf(frame / 12.0f));
+		Bag(200, 70 - hop * 10, 48, ACCENT, BG, hop < 0.15f ? 0.12f : 0.0f);
+		Card(30, 110, 340, 104, 16);
+		TextCentered(200, 120, 0.56f, TEXT, progressBarMsg, 316);
+		Pill(50, 152, 300, 14, MUTED);
+		if (p > 0.0f) Pill(50, 152, std::max(14.0f, 300 * p), 14, ACCENT);
+		Text(50, 176, 0.44f, SUB, verb);
+		TextRight(350, 176, 0.44f, SUB, str);
+		if (progressbarType == ProgressBar::Extracting) TextCentered(200, 194, 0.4f, SUB, extractingFile, 300);
 
-			case ProgressBar::Installing:
-				Gui::DrawStringCentered(0, 80, 0.6f, UITheme.TextColor(), str, 390, 0, font);
-				Animation::DrawProgressBar(installOffset, installSize);
-				break;
-
-			case ProgressBar::Copying:
-				Gui::DrawStringCentered(0, 80, 0.6f, UITheme.TextColor(), str, 390, 0, font);
-				Animation::DrawProgressBar(copyOffset, copySize);
-				break;
-		}
-
-		GFX::DrawBottom();
+		Gui::ScreenDraw(Bottom);
+		Rect(0, 0, 320, 240, BG);
+		Pattern(320, 240, frame * 0.25f, BG_DOT);
 		C3D_FrameEnd(0);
 	}
 }

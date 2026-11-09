@@ -6,6 +6,7 @@
 #define _KIOSK_SCREEN_HPP
 
 #include "common.hpp"
+#include "queueSystem.hpp"
 #include "storeEntry.hpp"
 #include <memory>
 #include <string>
@@ -60,6 +61,24 @@ private:
 	int shotIdx = 0;
 	bool shotFailed = false;
 
+	/* Download scene + celebration. */
+	struct Gummy { float x, y, vy; u32 color; };
+	struct Confetti { float x, y, vx, vy, rot, vrot, w, h; u32 color; };
+	struct Fly { C2D_Image icon = { nullptr, nullptr }; float sx = 0, sy = 0, ex = 0, ey = 0, t = 1.0f; };
+	std::vector<Gummy> gummies;
+	std::vector<Confetti> confetti;
+	Fly fly;
+	float jarLevel = 0.0f, railOffset = 0.0f, floorPhase = 0.0f, ripple = 0.0f, bagDrop = 0.0f;
+	int floorShift = 0, dropTimer = 0;
+	bool celebrating = false;
+	int celebT = 0, lastSerial = 0;
+	std::shared_ptr<StoreEntry> celebEntry;
+
+	/* Feel. */
+	float pressAnim = 0.0f, tabFade = 0.0f, tabBounce = 0.0f, dockBounce = 0.0f;
+	int lastSig = 0, lastTab = 0;
+	int today = 0; // Days since epoch, for "New" ribbons.
+
 	/* Animation. */
 	int frame = 0;
 	float tabPillX = 0;
@@ -83,8 +102,8 @@ private:
 	State StateOf(int idx) const;
 	bool IsInstalled(int idx) const;
 	bool InQueue(int idx, int script = -1) const;
-	void QueueScript(int idx, int script);
-	void UpdateEntry(int idx, bool quiet = false);
+	bool QueueScript(int idx, int script);
+	bool UpdateEntry(int idx, bool quiet = false);
 	void UpdateAll();
 	void OpenApp(int idx);
 	void CloseApp();
@@ -93,6 +112,10 @@ private:
 	void ShowToast(const std::string &msg);
 	void RespondToRequest();
 	static void KeepVisible(List &list, float viewH, float rowStride);
+	bool IsNew(int idx) const;
+	void StartFly(int idx, float sx, float sy);
+	float OverallProgress(const QueueEntry &q, float *stepP = nullptr) const;
+	int CursorSignature() const;
 
 	/* Logic. */
 	void HomeLogic(u32 down, u32 rep, touchPosition t);
@@ -104,7 +127,14 @@ private:
 	void Animate();
 
 	/* Drawing. */
-	void DrawStatusBar(u32 color) const;
+	void DrawChrome(const std::string &title, const std::string &right = "") const;
+	void DrawStatusBar() const;
+	void DrawFloorScene(float horizon) const;
+	void DrawJar(float cx, float top, float size, float level, const C2D_Image &icon, u32 frameColor, float scale, float alpha) const;
+	void DrawCelebration() const;
+	void DrawFly() const;
+	void DrawDock(float cx, float cy) const;
+	void DrawFocusRing(float x, float y, float w, float h, float r) const;
 	void DrawHero(int idx, bool detailed) const;
 	void DrawEmptyTop(const std::string &title, const std::string &subtitle, int glyph) const;
 	void DrawWhatsNewTop(int idx) const;

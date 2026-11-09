@@ -37,6 +37,9 @@ int QueueSystem::RequestNeeded = -1, QueueSystem::RequestAnswer = -1;
 bool QueueSystem::Wait = false, QueueSystem::Popup = false, QueueSystem::CancelCallback = false;
 std::string QueueSystem::RequestMsg = "", QueueSystem::RequestMsgName = "", QueueSystem::EndMsg = "";
 int QueueSystem::PriorElement = 0;
+int QueueSystem::FinishedSerial = 0;
+bool QueueSystem::LastOk = false;
+std::shared_ptr<StoreEntry> QueueSystem::LastEntry = nullptr;
 
 bool QueueRuns = false;
 static Thread queueThread = nullptr;
@@ -287,6 +290,10 @@ void QueueSystem::QueueHandle() {
 					StoreUtils::RefreshInstalledApps(entry.storeEntry->GetTitle());
 				}
 			}
+
+			QueueSystem::LastEntry = entry.storeEntry;
+			QueueSystem::LastOk = queueEntries[0].status == QueueStatus::Done && !QueueSystem::CancelCallback;
+			QueueSystem::FinishedSerial++;
 
 			if (QueueSystem::CancelCallback) QueueSystem::CancelCallback = false; // Reset.
 
