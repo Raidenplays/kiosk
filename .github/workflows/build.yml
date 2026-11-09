@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -27,5 +30,17 @@ jobs:
         with:
           name: Kiosk
           path: |
+            Kiosk.3dsx
+            Kiosk.cia
+      - name: Publish to the "latest" release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          prerelease: true
+          make_latest: true
+          body: Built automatically from the newest commit on main.
+          files: |
             Kiosk.3dsx
             Kiosk.cia
