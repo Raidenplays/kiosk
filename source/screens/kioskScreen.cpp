@@ -501,6 +501,12 @@ void KioskScreen::Logic(u32 hDown, u32 hHeld, touchPosition touch) {
 
 	if (this->storeOk) this->RefreshLists();
 
+#ifdef KIOSK_DEMO
+	this->DemoStep();
+	this->Animate();
+	return;
+#endif
+
 	/* While celebrating, any button (after a beat) continues. */
 	if (this->celebrating) {
 		if (this->celebT > 45 && (hDown & (KEY_A | KEY_B | KEY_TOUCH | KEY_START))) {
@@ -1648,3 +1654,68 @@ void KioskScreen::DrawFly() const {
 	RoundRect(x - 26 * s, y - 26 * s, 52 * s, 52 * s, 10 * s, WHITE);
 	Image(this->fly.icon, x, y, s);
 }
+
+#ifdef KIOSK_DEMO
+/*
+	Screenshot tour (built only with -DKIOSK_DEMO): steps through every screen on a timer
+	so an emulator can capture them without input. Fakes a download and some app states.
+*/
+void KioskScreen::DemoStep() {
+	static constexpr int PHASE = 300;
+	if (!this->storeOk || this->shelves.empty()) return;
+	const int phase = (this->frame / PHASE) % 10, t = this->frame % PHASE;
+
+	if (phase != this->demoPhase) {
+		this->demoPhase = phase;
+		/* Reset to a clean state each phase. */
+		this->celebrating = false;
+		if (this->appOpen) { this->appOpen = false; this->appAnim = 0; }
+		queueEntries.clear();
+		QueueRuns = false;
+		this->tab = TAB_HOME;
+
+		/* Pretend a few apps are installed, some with updates. */
+		for (int i = 0; i < 5 && i < (int)this->allSorted.size(); i++) {
+			const int ei = this->allSorted[(i * 7 + 3) % this->allSorted.size()];
+			E(ei)->SetInstalled(true);
+			E(ei)->SetUpdateAvl(i < 3);
+		}
+
+		const int pick = this->shelves[0].items[std::min<int>(2, this->shelves[0].items.size() - 1)];
+		switch (phase) {
+			case 0: this->shelfSel = 0; this->shelves[0].sel = 1; break;
+			case 1: this->shelfSel = std::min<int>(2, this->shelves.size() - 1); this->shelves[this->shelfSel].sel = 3; break;
+			case 2: this->OpenApp(pick); break;
+			case 3: this->OpenApp(pick); this->topMode = TopMode::WhatsNew; break;
+			case 4: this->tab = TAB_SEARCH; this->query = "emu"; this->RunSearch(); this->search.sel = 1; break;
+			case 5: this->tab = TAB_UPDATES; break;
+			case 6:
+			case 7:
+				this->tab = TAB_DOWNLOADS;
+				queueEntries.emplace_back(E(pick), 0);
+				if (this->allSorted.size() > 10) queueEntries.emplace_back(E(this->allSorted[10]), 0);
+				queueEntries[0].status = QueueStatus::Downloading;
+				queueEntries[0].currentStep = 1;
+				QueueRuns = true;
+				downloadTotal = 4 * 1024 * 1024;
+				break;
+			case 8:
+				this->celebrating = true;
+				this->celebT = 0;
+				this->celebEntry = E(pick);
+				this->confetti.clear();
+				break;
+			case 9: this->tab = TAB_LIBRARY; this->library.sel = 1; break;
+		}
+	}
+
+	/* Live bits inside a phase. */
+	if ((phase == 6 || phase == 7) && !queueEntries.empty()) {
+		const float p = (phase == 6 ? 0.0f : 0.5f) + 0.5f * t / PHASE;
+		const int steps = std::max(1, (int)queueEntries[0].storeEntry->GetScript(0).GetActions().size());
+		queueEntries[0].currentStep = 1 + (int)(p * (steps - 1) + 0.5f);
+		downloadNow = (curl_off_t)(downloadTotal * fmodf(p * steps, 1.0f));
+	}
+	if (phase == 0 && t == PHASE / 2) this->shelves[0].sel = 2;
+}
+#endif

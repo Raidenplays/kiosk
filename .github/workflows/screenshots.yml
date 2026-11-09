@@ -1,0 +1,100 @@
+name: Screenshots
+
+# Builds the demo tour (-DKIOSK_DEMO), runs it in the Azahar emulator on a virtual display,
+# records frames and publishes them to the "screens" release.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'source/**'
+      - 'include/**'
+      - '.github/workflows/screenshots.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build-demo:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: git config --global safe.directory '*'
+      - name: Build demo 3dsx
+        # -k: the .cia step fails here (no bannertool/makerom in this job) but the .3dsx still builds.
+        run: |
+          make -k TARGET=KioskDemo BUILD=build-demo EXTRA_CFLAGS=-DKIOSK_DEMO || true
+          ls -la KioskDemo.3dsx
+      - uses: actions/upload-artifact@v4
+        with:
+          name: demo
+          path: KioskDemo.3dsx
+
+  capture:
+    needs: build-demo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: demo
+      - name: Install display + GL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb ffmpeg xdotool imagemagick libgl1-mesa-dri libegl1 libxkbcommon-x11-0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-cursor0 libxcb-shape0 libfuse2 zip
+      - name: Fetch Azahar
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -x
+          gh release view --repo azahar-emu/azahar --json assets -q '.assets[].name'
+          name=$(gh release view --repo azahar-emu/azahar --json assets -q '.assets[].name' | grep -i appimage | grep -vi 'zsync\|room' | head -1)
+          gh release download --repo azahar-emu/azahar -p "$name" -O azahar.bin
+          file azahar.bin
+          if file azahar.bin | grep -qi 'gzip\|tar'; then mkdir az && tar xf azahar.bin -C az && cp "$(find az -iname '*.AppImage' | head -1)" azahar.AppImage; else mv azahar.bin azahar.AppImage; fi
+          chmod +x azahar.AppImage
+          ./azahar.AppImage --appimage-extract >/dev/null
+          ls squashfs-root
+      - name: Prepare SD card
+        run: |
+          SD=~/.local/share/azahar-emu/sdmc/3ds/Universal-Updater/stores
+          mkdir -p "$SD"
+          curl -L -o "$SD/universal-db.unistore" https://db.universal-team.net/unistore/universal-db.unistore
+          python3 - "$SD" <<'EOF'
+          import json, sys, urllib.request, os
+          sd = sys.argv[1]
+          info = json.load(open(os.path.join(sd, "universal-db.unistore")))["storeInfo"]
+          sheets = info.get("sheet", []); urls = info.get("sheetURL", [])
+          if isinstance(sheets, str): sheets, urls = [sheets], [urls]
+          for n, u in zip(sheets, urls):
+              print("sheet", n, u)
+              urllib.request.urlretrieve(u, os.path.join(sd, n))
+          EOF
+          ls -la "$SD"
+          mkdir -p ~/.config/azahar-emu
+          printf '[Renderer]\nresolution_factor=1\nresolution_factor\\default=false\n[Layout]\nlayout_option=0\nlayout_option\\default=false\n[UI]\nfirstStart=false\nfirstStart\\default=false\n' > ~/.config/azahar-emu/qt-config.ini
+      - name: Run and record
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          QT_QPA_PLATFORM: xcb
+        run: |
+          Xvfb :99 -screen 0 1024x768x24 &
+          export DISPLAY=:99
+          sleep 2
+          ./squashfs-root/AppRun "$PWD/KioskDemo.3dsx" > emu.log 2>&1 &
+          mkdir frames
+          ffmpeg -loglevel error -f x11grab -video_size 1024x768 -framerate 1 -i :99 -t 300 frames/%04d.png
+          tail -50 emu.log || true
+          zip -qr frames.zip frames
+      - name: Publish frames
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: screens
+          name: Screenshot frames
+          prerelease: true
+          make_latest: false
+          files: |
+            frames.zip
+            emu.log

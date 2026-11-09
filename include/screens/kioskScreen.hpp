@@ -125,6 +125,10 @@ private:
 	void DownloadsLogic(u32 down, u32 rep, touchPosition t);
 	void AppLogic(u32 down, u32 rep, touchPosition t);
 	void Animate();
+#ifdef KIOSK_DEMO
+	void DemoStep();
+	int demoPhase = -1;
+#endif
 
 	/* Drawing. */
 	void DrawChrome(const std::string &title, const std::string &right = "") const;
