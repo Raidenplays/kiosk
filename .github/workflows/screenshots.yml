@@ -42,7 +42,7 @@ jobs:
       - name: Install display + GL
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb ffmpeg xdotool imagemagick libgl1-mesa-dri libegl1 libxkbcommon-x11-0 \
+          sudo apt-get install -y xvfb ffmpeg xdotool imagemagick libgl1-mesa-dri libegl1 libopengl0 libglx-mesa0 libgl1 libvulkan1 mesa-vulkan-drivers libxkbcommon-x11-0 \
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-cursor0 libxcb-shape0 libfuse2 zip
       - name: Fetch Azahar
         env:
@@ -57,6 +57,7 @@ jobs:
           chmod +x azahar.AppImage
           ./azahar.AppImage --appimage-extract >/dev/null
           ls squashfs-root
+          ldd squashfs-root/usr/bin/* 2>/dev/null | grep 'not found' | sort -u || true
       - name: Prepare SD card
         run: |
           SD=~/.local/share/azahar-emu/sdmc/3ds/Universal-Updater/stores
